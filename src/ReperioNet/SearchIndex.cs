@@ -276,8 +276,11 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             // §6.3: resolve language (may stay null).
             var language = entry.Language ?? _options.LanguageDetector?.Detect(text) ?? _options.DefaultLanguage;
 
-            // §15.4 column values (binding): raw text goes into base; stem/phonetic stay empty in M1–2;
-            // rank_text holds the text only when content is not stored (no duplicate full-text storage).
+            // §6.4–6.5: derive the stem/phonetic streams with the language's analyzer (or fallback).
+            var (stem, phonetic) = ComputeStreams(language, text);
+
+            // §15.4 column values (binding): raw text goes into base; rank_text holds the text only
+            // when content is not stored (no duplicate full-text storage).
             batch.Upsert(
                 docId: entry.Id,
                 language: language,
@@ -285,8 +288,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
                 rankText: _options.StoreContent ? string.Empty : text,
                 content: _options.StoreContent ? text : null,
                 baseText: text,
-                stem: string.Empty,
-                phonetic: string.Empty);
+                stem: stem,
+                phonetic: phonetic);
         }
 
         transaction.Commit();
@@ -373,23 +376,79 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         using var transaction = _writeConnection.BeginTransaction();
         IndexSchema.RecreateSearchTables(_writeConnection, transaction, _options.EnableTrigram);
 
-        // Reindex from documents. The original (truncated) text is content when stored, else
-        // rank_text (§15.4 invariant). stem/phonetic remain empty in Milestones 1–2.
-        using var command = _writeConnection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = _options.EnableTrigram
-            ? """
-              INSERT INTO documents_fts (rowid, base, stem, phonetic)
-              SELECT rowid, COALESCE(content, rank_text), '', '' FROM documents;
-              INSERT INTO documents_trgm (rowid, text)
-              SELECT rowid, COALESCE(content, rank_text) FROM documents;
-              """
-            : """
-              INSERT INTO documents_fts (rowid, base, stem, phonetic)
-              SELECT rowid, COALESCE(content, rank_text), '', '' FROM documents;
-              """;
-        command.ExecuteNonQuery();
+        // Reindex from documents: the original (truncated) text is content when stored, else
+        // rank_text (§15.4 invariant); the stored language re-selects each document's analyzer so
+        // the stem/phonetic streams are re-derived exactly as at add time.
+        var rows = new List<(long Rowid, string? Language, string Text)>();
+        using (var select = _writeConnection.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = "SELECT rowid, language, COALESCE(content, rank_text) FROM documents;";
+            using var reader = select.ExecuteReader();
+            while (reader.Read())
+            {
+                rows.Add((reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetString(2)));
+            }
+        }
+
+        using var insertFts = _writeConnection.CreateCommand();
+        insertFts.Transaction = transaction;
+        insertFts.CommandText =
+            "INSERT INTO documents_fts (rowid, base, stem, phonetic) VALUES (@rowid, @base, @stem, @phonetic);";
+        insertFts.Parameters.Add("@rowid", SqliteType.Integer);
+        insertFts.Parameters.Add("@base", SqliteType.Text);
+        insertFts.Parameters.Add("@stem", SqliteType.Text);
+        insertFts.Parameters.Add("@phonetic", SqliteType.Text);
+        insertFts.Prepare();
+
+        using var insertTrigram = _options.EnableTrigram ? _writeConnection.CreateCommand() : null;
+        if (insertTrigram is not null)
+        {
+            insertTrigram.Transaction = transaction;
+            insertTrigram.CommandText = "INSERT INTO documents_trgm (rowid, text) VALUES (@rowid, @text);";
+            insertTrigram.Parameters.Add("@rowid", SqliteType.Integer);
+            insertTrigram.Parameters.Add("@text", SqliteType.Text);
+            insertTrigram.Prepare();
+        }
+
+        foreach (var (rowid, language, text) in rows)
+        {
+            var (stem, phonetic) = ComputeStreams(language, text);
+
+            insertFts.Parameters["@rowid"].Value = rowid;
+            insertFts.Parameters["@base"].Value = text;
+            insertFts.Parameters["@stem"].Value = stem;
+            insertFts.Parameters["@phonetic"].Value = phonetic;
+            insertFts.ExecuteNonQuery();
+
+            if (insertTrigram is not null)
+            {
+                insertTrigram.Parameters["@rowid"].Value = rowid;
+                insertTrigram.Parameters["@text"].Value = text;
+                insertTrigram.ExecuteNonQuery();
+            }
+        }
+
         transaction.Commit();
+    }
+
+    /// <summary>Derives the space-joined stem/phonetic streams for a document (§6.4–6.5).</summary>
+    private (string Stem, string Phonetic) ComputeStreams(string? language, string text)
+    {
+        if (!_options.EnableStemming && !_options.EnablePhonetic)
+        {
+            return (string.Empty, string.Empty);
+        }
+
+        var analyzer = Analysis.Resolve(_options.Analyzers, language);
+        var tokens = Tokenizer.Tokenize(text);
+        var stem = _options.EnableStemming
+            ? string.Join(' ', Analysis.StemTokens(analyzer, tokens, _options.RemoveStopWords))
+            : string.Empty;
+        var phonetic = _options.EnablePhonetic
+            ? string.Join(' ', Analysis.PhoneticTokens(analyzer, tokens, _options.RemoveStopWords))
+            : string.Empty;
+        return (stem, phonetic);
     }
 
     // ---- Read pipeline -------------------------------------------------------------------------
@@ -412,8 +471,21 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         var bestRank = new Dictionary<long, double>();
         if (tokens.Count > 0)
         {
-            // §9.5: base clause, plus the short-query prefix aid when the whole query is < 3 chars.
-            var match = Fts5Match.BuildBaseMatch(tokens, prefixLastToken: query.Length < 3);
+            // §9.2: resolve the query language and pick its analyzer (or the identity fallback).
+            var language = options.Language ?? _options.LanguageDetector?.Detect(query) ?? _options.DefaultLanguage;
+            var analyzer = Analysis.Resolve(_options.Analyzers, language);
+
+            // §9.3: derive qStem/qPhon with the same processing as content.
+            var stemTokens = _options.EnableStemming
+                ? Analysis.StemTokens(analyzer, tokens, _options.RemoveStopWords)
+                : null;
+            var phoneticTokens = _options.EnablePhonetic && options.EnablePhonetic
+                ? Analysis.PhoneticTokens(analyzer, tokens, _options.RemoveStopWords)
+                : null;
+
+            // §9.5: OR-combined column clauses, plus the short-query prefix aid on base when the
+            // whole query is < 3 chars.
+            var match = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
             CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, bestRank);
         }
 

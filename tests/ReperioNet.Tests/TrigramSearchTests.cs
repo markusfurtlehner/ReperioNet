@@ -134,7 +134,9 @@ public class TrigramSearchTests
     public async Task CandidatePoolSize_CapsTheResultSet()
     {
         using var db = new TestDatabase();
-        await using var index = await TestOptions.OpenAsync(db);
+        // Stemming off: the deduped stem stream (tf=1 per doc) would otherwise add a
+        // length-dependent bm25 term that breaks the monotonic tf ladder below.
+        await using var index = await TestOptions.OpenAsync(db, o => o.EnableStemming = false);
 
         // Distinct term frequencies give every doc a distinct bm25 rank. Fuzzy off and a second
         // absent token ("tau") keep scores pure normalized bm25 (no boost, no 1.0 tie-cap).

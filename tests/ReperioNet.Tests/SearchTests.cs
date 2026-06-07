@@ -170,7 +170,8 @@ public class SearchTests
     public async Task Search_LimitAndOffset_PageThroughResults()
     {
         using var db = new TestDatabase();
-        await using var index = await TestOptions.OpenAsync(db);
+        // Stemming off so the deduped stem stream cannot perturb the monotonic tf ladder.
+        await using var index = await TestOptions.OpenAsync(db, o => o.EnableStemming = false);
 
         // Distinct term frequencies give a deterministic bm25 order: doc-5 best ... doc-1 worst.
         // Fuzzy is disabled and the second query token ("gamma") occurs nowhere, so no exact-match

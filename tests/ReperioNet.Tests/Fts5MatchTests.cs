@@ -37,4 +37,30 @@ public class Fts5MatchTests
             "base : (\"a\" OR \"b\" OR \"b\"*)",
             Fts5Match.BuildBaseMatch(["a", "b"], prefixLastToken: true));
     }
+
+    [Fact]
+    public void BuildMatch_AppendsStemAndPhoneticClauses()
+    {
+        Assert.Equal(
+            "base : (\"a\") OR stem : (\"s1\" OR \"s2\") OR phonetic : (\"p\")",
+            Fts5Match.BuildMatch(["a"], prefixLastToken: false, ["s1", "s2"], ["p"]));
+    }
+
+    [Fact]
+    public void BuildMatch_OmitsEmptyOrNullClauses()
+    {
+        Assert.Equal("base : (\"a\")", Fts5Match.BuildMatch(["a"], prefixLastToken: false, null, null));
+        Assert.Equal("base : (\"a\")", Fts5Match.BuildMatch(["a"], prefixLastToken: false, [], []));
+        Assert.Equal(
+            "base : (\"a\") OR phonetic : (\"p\")",
+            Fts5Match.BuildMatch(["a"], prefixLastToken: false, null, ["p"]));
+    }
+
+    [Fact]
+    public void BuildMatch_PrefixAidAppliesOnlyToBase()
+    {
+        Assert.Equal(
+            "base : (\"ab\" OR \"ab\"*) OR stem : (\"ab\")",
+            Fts5Match.BuildMatch(["ab"], prefixLastToken: true, ["ab"], null));
+    }
 }
