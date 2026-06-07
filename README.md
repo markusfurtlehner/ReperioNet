@@ -88,4 +88,6 @@ paging and optional `<mark>`-style snippets. Scores are normalized to 0..1, high
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The language packs contain C# ports of the Snowball stemming
+algorithms (BSD 3-clause, © Dr Martin Porter / Richard Boulton) and other derived material; see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full notices.

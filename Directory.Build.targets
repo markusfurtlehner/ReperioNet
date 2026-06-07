@@ -1,9 +1,11 @@
 <Project>
 
-  <!-- Every shipped package carries the repository README (PRD §12). Evaluated here (after the
-       project file) so IsPackable set by test/sample projects is respected. -->
+  <!-- Every shipped package carries the repository README (PRD §12) and the third-party license
+       notices (Snowball BSD-3, Apache Lucene, NTextCat). Evaluated here (after the project file)
+       so IsPackable set by test/sample projects is respected. -->
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
 </Project>
