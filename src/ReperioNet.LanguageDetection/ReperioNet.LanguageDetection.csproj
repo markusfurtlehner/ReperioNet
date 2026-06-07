@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ReperioNet.LanguageDetection</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NTextCat" Version="0.3.65" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ReperioNet\ReperioNet.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Vendored from the NTextCat 0.3.65 nupkg (MIT): the package ships the profile only under
+         the legacy content/ folder, which does not flow to PackageReference consumers. -->
+    <None Include="LanguageModels\Core14.profile.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

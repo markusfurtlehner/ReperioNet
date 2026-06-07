@@ -35,6 +35,8 @@
     <ProjectReference Include="..\..\src\ReperioNet.Languages.Hu\ReperioNet.Languages.Hu.csproj" />
     <ProjectReference Include="..\..\src\ReperioNet.Languages.Ro\ReperioNet.Languages.Ro.csproj" />
     <ProjectReference Include="..\..\src\ReperioNet.Languages.Tr\ReperioNet.Languages.Tr.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.All\ReperioNet.Languages.All.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.LanguageDetection\ReperioNet.LanguageDetection.csproj" />
   </ItemGroup>
 
 </Project>

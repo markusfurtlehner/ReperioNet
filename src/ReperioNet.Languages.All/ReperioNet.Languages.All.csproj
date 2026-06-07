@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ReperioNet.Languages.All</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ReperioNet.Languages.De\ReperioNet.Languages.De.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.En\ReperioNet.Languages.En.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Fr\ReperioNet.Languages.Fr.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Es\ReperioNet.Languages.Es.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.It\ReperioNet.Languages.It.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Pt\ReperioNet.Languages.Pt.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Nl\ReperioNet.Languages.Nl.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Sv\ReperioNet.Languages.Sv.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.No\ReperioNet.Languages.No.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Da\ReperioNet.Languages.Da.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Fi\ReperioNet.Languages.Fi.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Ru\ReperioNet.Languages.Ru.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Hu\ReperioNet.Languages.Hu.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Ro\ReperioNet.Languages.Ro.csproj" />
+    <ProjectReference Include="..\ReperioNet.Languages.Tr\ReperioNet.Languages.Tr.csproj" />
+  </ItemGroup>
+
+</Project>
