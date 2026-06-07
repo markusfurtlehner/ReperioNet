@@ -16,7 +16,11 @@ public class SearchTests
 
         Assert.Single(hits);
         Assert.Equal("doc", hits[0].Id);
-        Assert.Equal(1.0, hits[0].Score, 9);
+
+        // Sole candidate: normBm25 = 1.0 and the substring boost applies, so the §9.11 blend
+        // guarantees at least 0.4 * 1.0 + 0.15; the fuzzy component (case-sensitive
+        // Fuzz.TokenSetRatio per §9.10) adds the rest.
+        Assert.InRange(hits[0].Score, 0.55, 1.0);
         Assert.Null(hits[0].Snippet);
     }
 
@@ -84,9 +88,9 @@ public class SearchTests
         Assert.Equal("relevant", hits[0].Id);
         Assert.Equal("diluted", hits[1].Id);
 
-        // §15.6/§9.9 page normalization: best row -> 1.0, worst row -> 0.0.
+        // §9.11 blend: the best candidate saturates at 1.0; the weaker one stays strictly between.
         Assert.Equal(1.0, hits[0].Score, 9);
-        Assert.Equal(0.0, hits[1].Score, 9);
+        Assert.InRange(hits[1].Score, 0.000000001, 0.999999999);
     }
 
     [Fact]
@@ -169,12 +173,14 @@ public class SearchTests
         await using var index = await TestOptions.OpenAsync(db);
 
         // Distinct term frequencies give a deterministic bm25 order: doc-5 best ... doc-1 worst.
+        // Fuzzy is disabled and the second query token ("gamma") occurs nowhere, so no exact-match
+        // boost applies and scores are pure normalized bm25 — strictly distinct, no tie-cap at 1.0.
         await index.AddRangeAsync(Enumerable.Range(1, 5).Select(i =>
             TestOptions.Entry($"doc-{i}", string.Join(' ', Enumerable.Repeat("omega", i)) + " padding text")));
 
-        var pageOne = await index.SearchAsync("omega", new SearchQueryOptions { Limit = 2 });
-        var pageTwo = await index.SearchAsync("omega", new SearchQueryOptions { Limit = 2, Offset = 2 });
-        var beyond = await index.SearchAsync("omega", new SearchQueryOptions { Limit = 2, Offset = 10 });
+        var pageOne = await index.SearchAsync("omega gamma", new SearchQueryOptions { Limit = 2, EnableFuzzy = false });
+        var pageTwo = await index.SearchAsync("omega gamma", new SearchQueryOptions { Limit = 2, Offset = 2, EnableFuzzy = false });
+        var beyond = await index.SearchAsync("omega gamma", new SearchQueryOptions { Limit = 2, Offset = 10, EnableFuzzy = false });
 
         Assert.Equal(new[] { "doc-5", "doc-4" }, pageOne.Select(h => h.Id));
         Assert.Equal(new[] { "doc-3", "doc-2" }, pageTwo.Select(h => h.Id));

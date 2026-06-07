@@ -136,13 +136,14 @@ public class TrigramSearchTests
         using var db = new TestDatabase();
         await using var index = await TestOptions.OpenAsync(db);
 
-        // Distinct term frequencies give every doc a distinct bm25 rank.
+        // Distinct term frequencies give every doc a distinct bm25 rank. Fuzzy off and a second
+        // absent token ("tau") keep scores pure normalized bm25 (no boost, no 1.0 tie-cap).
         await index.AddRangeAsync(Enumerable.Range(1, 10).Select(i =>
             TestOptions.Entry($"doc-{i}", string.Join(' ', Enumerable.Repeat("sigma", i)) + " padding words")));
 
         var hits = await index.SearchAsync(
-            "sigma",
-            new SearchQueryOptions { CandidatePoolSize = 5, Limit = 100 });
+            "sigma tau",
+            new SearchQueryOptions { CandidatePoolSize = 5, Limit = 100, EnableFuzzy = false });
 
         // The pool keeps only the 5 best-bm25 candidates (§9.7).
         Assert.Equal(5, hits.Count);
@@ -162,7 +163,9 @@ public class TrigramSearchTests
 
         Assert.Single(hits);
         Assert.Equal(meta, hits[0].Metadata);
-        Assert.Equal(1.0, hits[0].Score, 9);
+
+        // Sole candidate: normBm25 = 1.0, blended with its fuzzy similarity plus the substring boost.
+        Assert.InRange(hits[0].Score, 0.5, 1.0);
     }
 
     [Fact]

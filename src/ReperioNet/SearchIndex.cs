@@ -441,7 +441,7 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             return EmptyHits;
         }
 
-        // §9.8: load the candidates' documents. (rank_text/content join the load with fuzzy in M4.)
+        // §9.8: load metadata, rank_text and content (if stored) for each candidate.
         var documents = LoadDocuments(connection, pool.Select(candidate => candidate.Rowid));
 
         // §9.9: normalize bm25 across the pool (lower is better; best maps to 1.0).
@@ -453,22 +453,57 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             max = Math.Max(max, candidate.Rank);
         }
 
-        // Order by score desc == bm25 asc (normalization is monotonic), doc_id asc as the stable
-        // tiebreaker; then page. Metadata is deserialized only for the returned page.
-        var page = pool
-            .Where(candidate => documents.ContainsKey(candidate.Rowid))
-            .Select(candidate => (candidate.Rank, Doc: documents[candidate.Rowid]))
-            .OrderBy(candidate => candidate.Rank)
-            .ThenBy(candidate => candidate.Doc.DocId, StringComparer.Ordinal)
+        var foldedQuery = TextFold.Fold(query);
+        var scored = new List<(double Score, string DocId, string MetadataJson, string? Content)>(pool.Count);
+        foreach (var (rowid, rank) in pool)
+        {
+            if (!documents.TryGetValue(rowid, out var doc))
+            {
+                continue;
+            }
+
+            var normBm25 = max > min ? (max - rank) / (max - min) : 1.0;
+
+            // §9.10: fuzzy pass against content when stored, else rank_text.
+            var text = doc.Content ?? doc.RankText;
+
+            // §9.11: blend, or pure normalized bm25 when fuzzy is off.
+            var score = options.EnableFuzzy
+                ? (0.6 * _options.FuzzyRanker.Score(query, text)) + (0.4 * normBm25)
+                : normBm25;
+
+            // §9.11 exact-match boost: folded text contains the folded raw query as a substring.
+            if (foldedQuery.Length > 0 && TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal))
+            {
+                score = Math.Min(1.0, score + 0.15);
+            }
+
+            // §9.12: drop scores below MinScore.
+            if (score < options.MinScore)
+            {
+                continue;
+            }
+
+            scored.Add((score, doc.DocId, doc.MetadataJson, doc.Content));
+        }
+
+        // §9.12: order by score desc, doc_id asc as the stable tiebreaker; then page.
+        var page = scored
+            .OrderByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.DocId, StringComparer.Ordinal)
             .Skip(Math.Max(0, options.Offset))
             .Take(Math.Max(0, options.Limit));
 
+        // §9.13: project to SearchHit; metadata is deserialized (and snippets built) only for the page.
+        var includeSnippet = options.IncludeSnippet && _options.StoreContent;
         var hits = new List<SearchHit<TMeta>>();
-        foreach (var (rank, doc) in page)
+        foreach (var (score, docId, metadataJson, content) in page)
         {
-            var score = max > min ? (max - rank) / (max - min) : 1.0;
-            var metadata = JsonSerializer.Deserialize(doc.MetadataJson, _options.MetadataTypeInfo)!;
-            hits.Add(new SearchHit<TMeta>(doc.DocId, metadata, score));
+            var metadata = JsonSerializer.Deserialize(metadataJson, _options.MetadataTypeInfo)!;
+            var snippet = includeSnippet && content is not null
+                ? SnippetBuilder.Build(content, tokens, options.Snippet)
+                : null;
+            hits.Add(new SearchHit<TMeta>(docId, metadata, score, snippet));
         }
 
         return hits;
@@ -500,12 +535,12 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         }
     }
 
-    /// <summary>Loads <c>doc_id</c> and metadata JSON for the candidate rowids (chunked IN queries).</summary>
-    private static Dictionary<long, (string DocId, string MetadataJson)> LoadDocuments(
+    /// <summary>Loads <c>doc_id</c>, metadata JSON, <c>rank_text</c> and <c>content</c> for the candidate rowids (chunked IN queries, §9.8).</summary>
+    private static Dictionary<long, (string DocId, string MetadataJson, string RankText, string? Content)> LoadDocuments(
         SqliteConnection connection,
         IEnumerable<long> rowids)
     {
-        var documents = new Dictionary<long, (string, string)>();
+        var documents = new Dictionary<long, (string, string, string, string?)>();
         foreach (var chunk in rowids.Chunk(500))
         {
             using var command = connection.CreateCommand();
@@ -517,12 +552,16 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             }
 
             command.CommandText =
-                $"SELECT rowid, doc_id, metadata FROM documents WHERE rowid IN ({string.Join(", ", names)});";
+                $"SELECT rowid, doc_id, metadata, rank_text, content FROM documents WHERE rowid IN ({string.Join(", ", names)});";
 
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
-                documents[reader.GetInt64(0)] = (reader.GetString(1), reader.GetString(2));
+                documents[reader.GetInt64(0)] = (
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4));
             }
         }
 
