@@ -562,9 +562,14 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             return EmptyHits;
         }
 
-        // §9.7: gather candidates from both MATCH queries; merge by rowid keeping the best (lowest)
-        // bm25 seen for that rowid.
-        var bestRank = new Dictionary<long, double>();
+        // §9.7: gather candidates; merge by rowid keeping the best (lowest) bm25 seen for that
+        // rowid. With TermMatch.AllTerms (default) and a multi-token query, a strict pass requires
+        // every base term first; an any-term pass widens recall only when the strict pass yields
+        // fewer than Limit candidates. All-terms candidates always rank ahead (tier 0).
+        var primary = new Dictionary<long, double>();
+        var secondary = new Dictionary<long, double>();
+        var useAllTerms = options.TermMatch == TermMatch.AllTerms && tokens.Count > 1;
+
         if (tokens.Count > 0)
         {
             // §9.2: resolve the query language and pick its analyzer (or the identity fallback).
@@ -579,29 +584,68 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
                 ? Analysis.PhoneticTokens(analyzer, tokens, _options.RemoveStopWords)
                 : null;
 
-            // §9.5: OR-combined column clauses, plus the short-query prefix aid on base when the
-            // whole query is < 3 chars.
-            var match = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
-            CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, bestRank);
+            if (useAllTerms)
+            {
+                // Strict pass: implicit-AND on base only (cheap — the intersection is small).
+                var andMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: false, stemTokens: null, phoneticTokens: null, allTermsBase: true);
+                CollectCandidates(connection, "documents_fts", andMatch, options.CandidatePoolSize, primary);
+
+                if (primary.Count < Math.Max(0, options.Limit))
+                {
+                    // Recall fallback: the classic §9.5 any-term expression incl. stem/phonetic.
+                    var orMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
+                    CollectCandidates(connection, "documents_fts", orMatch, options.CandidatePoolSize, secondary);
+                }
+            }
+            else
+            {
+                // §9.5: OR-combined column clauses, plus the short-query prefix aid on base when
+                // the whole query is < 3 chars.
+                var match = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
+                CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, primary);
+            }
         }
 
         if (useTrigram)
         {
             // §9.6: the escaped full query string against the trigram table (substring recall).
-            CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, bestRank);
+            // In all-terms mode substring matches join the fallback tier unless the document also
+            // satisfied the strict pass.
+            CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, useAllTerms ? secondary : primary);
         }
 
-        if (bestRank.Count == 0)
+        // Dedup across tiers: a rowid seen by the strict pass stays tier 0 with its best bm25.
+        if (secondary.Count > 0)
+        {
+            foreach (var (rowid, rank) in secondary)
+            {
+                if (primary.TryGetValue(rowid, out var existing))
+                {
+                    primary[rowid] = Math.Min(existing, rank);
+                }
+            }
+
+            foreach (var rowid in primary.Keys)
+            {
+                secondary.Remove(rowid);
+            }
+        }
+
+        if (primary.Count == 0 && secondary.Count == 0)
         {
             return EmptyHits;
         }
 
-        // Keep the top CandidatePoolSize rowids ordered by bm25, lowest first (§9.7).
-        var pool = bestRank
-            .OrderBy(candidate => candidate.Value)
-            .ThenBy(candidate => candidate.Key)
+        // Keep the top CandidatePoolSize rowids ordered by tier, then bm25 (lowest first; §9.7).
+        var pool = primary
+            .Select(candidate => (Rowid: candidate.Key, Rank: candidate.Value, Tier: 0))
+            .OrderBy(candidate => candidate.Rank)
+            .ThenBy(candidate => candidate.Rowid)
+            .Concat(secondary
+                .Select(candidate => (Rowid: candidate.Key, Rank: candidate.Value, Tier: 1))
+                .OrderBy(candidate => candidate.Rank)
+                .ThenBy(candidate => candidate.Rowid))
             .Take(options.CandidatePoolSize)
-            .Select(candidate => (Rowid: candidate.Key, Rank: candidate.Value))
             .ToList();
 
         if (pool.Count == 0)
@@ -622,8 +666,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         var foldedQuery = TextFold.Fold(query);
-        var scored = new List<(double Score, string DocId, string MetadataJson, string? Content)>(pool.Count);
-        foreach (var (rowid, rank) in pool)
+        var scored = new List<(int Tier, double Score, string DocId, string MetadataJson, string? Content)>(pool.Count);
+        foreach (var (rowid, rank, tier) in pool)
         {
             if (!documents.TryGetValue(rowid, out var doc))
             {
@@ -652,12 +696,14 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
                 continue;
             }
 
-            scored.Add((score, doc.DocId, doc.MetadataJson, doc.Content));
+            scored.Add((tier, score, doc.DocId, doc.MetadataJson, doc.Content));
         }
 
-        // §9.12: order by score desc, doc_id asc as the stable tiebreaker; then page.
+        // §9.12: order by tier (all-terms matches ahead of fallback matches), then score desc,
+        // doc_id asc as the stable tiebreaker; then page.
         var page = scored
-            .OrderByDescending(candidate => candidate.Score)
+            .OrderBy(candidate => candidate.Tier)
+            .ThenByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.DocId, StringComparer.Ordinal)
             .Skip(Math.Max(0, options.Offset))
             .Take(Math.Max(0, options.Limit));
@@ -665,7 +711,7 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         // §9.13: project to SearchHit; metadata is deserialized (and snippets built) only for the page.
         var includeSnippet = options.IncludeSnippet && _options.StoreContent;
         var hits = new List<SearchHit<TMeta>>();
-        foreach (var (score, docId, metadataJson, content) in page)
+        foreach (var (_, score, docId, metadataJson, content) in page)
         {
             var metadata = JsonSerializer.Deserialize(metadataJson, _options.MetadataTypeInfo)!;
             var snippet = includeSnippet && content is not null

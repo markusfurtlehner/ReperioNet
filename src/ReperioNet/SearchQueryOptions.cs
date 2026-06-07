@@ -12,6 +12,14 @@ public sealed class SearchQueryOptions
     /// <summary>Hits scoring below this threshold are dropped. Default: 0.0.</summary>
     public double MinScore { get; set; }
 
+    /// <summary>
+    /// How multiple query terms combine on the base column. Default: <see cref="ReperioNet.TermMatch.AllTerms"/>
+    /// (all terms required, with an automatic any-term fallback when fewer than <see cref="Limit"/>
+    /// candidates match; fallback hits rank after all-terms hits). Stem/phonetic variant matching
+    /// and trigram substring recall are unaffected by this setting.
+    /// </summary>
+    public TermMatch TermMatch { get; set; } = TermMatch.AllTerms;
+
     /// <summary>Enables the fuzzy re-ranking pass. Default: <see langword="true"/>.</summary>
     public bool EnableFuzzy { get; set; } = true;
 

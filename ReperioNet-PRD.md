@@ -151,8 +151,11 @@ public sealed class SearchQueryOptions
     public string? Language { get; set; }
     public bool   IncludeSnippet { get; set; } = false;    // requires StoreContent = true
     public int    CandidatePoolSize { get; set; } = 300;
+    public TermMatch TermMatch { get; set; } = TermMatch.AllTerms;  // see §9.5
     public SnippetOptions Snippet { get; set; } = new();
 }
+
+public enum TermMatch { AllTerms, AnyTerms }   // multi-token base-term combination, see §9.5
 
 public sealed class SnippetOptions
 {
@@ -339,6 +342,7 @@ public static class AllLanguagesExtensions
    - `OR {stem : "s1" OR ...}`  (if stemming)
    - `OR {phonetic : "p1" OR ...}`  (if `options.EnablePhonetic` and codes exist)
    - **Short-query aid:** if the whole `query` length < 3, append a prefix term on the last base token: `OR {base : "tN"*}` (FTS5 prefix query) to keep 1–2 char queries useful.
+   - **Term combination (`TermMatch`, default `AllTerms`):** for multi-token queries the default is a two-pass scheme. A **strict pass** runs first with an implicit-AND base clause only — `base : ("t1" "t2" ...)` — requiring every base term; this is the common user intent and far cheaper than OR because the intersection is small (FTS5 bm25-scores every matching row). If the strict pass yields **fewer candidate rowids than `Limit`**, a **fallback pass** runs the full OR expression above (base OR'd, plus stem/phonetic clauses); its candidates are appended after the strict-pass candidates, deduplicated by rowid, and rank strictly behind them in the final ordering (tier before score in §9.12). Stem/phonetic clauses and the §9.6 trigram recall always keep OR/substring semantics — requiring all of them would over-restrict variant and typo matching. `TermMatch.AnyTerms` skips the strict pass and reproduces the plain OR expression. Single-token queries are unaffected.
 6. **Trigram recall:** if `EnableTrigram` and `query.Length >= 3`, also run `documents_trgm MATCH :q` where `:q` is the escaped full query string (substring + typo recall, incidental CJK).
 7. **Gather candidates:** run both MATCH queries selecting `rowid` and `bm25(<table>)`. Merge by `rowid`, keeping the **best (lowest) bm25** seen for that rowid. Keep the top `CandidatePoolSize` rowids ordered by bm25 (lowest first).
 8. **Load** for each candidate: `metadata`, `rank_text`, and `content` (if stored).
@@ -348,7 +352,7 @@ public static class AllLanguagesExtensions
     - If `EnableFuzzy`: `score = 0.6 * fuzzy01 + 0.4 * normBm25`.
     - Else: `score = normBm25`.
     - **Exact-match boost:** if the diacritic-folded, lowercased `text` contains the diacritic-folded, lowercased raw `query` as a substring: `score = min(1.0, score + 0.15)`.
-12. **Filter & page:** drop `score < MinScore`; order by `score` desc, then by `doc_id` asc as a stable tiebreaker; apply `Offset`, then `Limit`.
+12. **Filter & page:** drop `score < MinScore`; order by `score` desc, then by `doc_id` asc as a stable tiebreaker (when the `AllTerms` strict pass ran, all-terms candidates order before fallback candidates — tier precedes score; see §9.5); apply `Offset`, then `Limit`.
 13. **Project to `SearchHit`:** deserialize `metadata` via `MetadataTypeInfo`. If `IncludeSnippet && StoreContent`: build a snippet from `content` — a window of up to `Snippet.MaxLength` characters centered on the first occurrence (diacritic/case-insensitive) of any `qBase` token, wrapping each matched token occurrence in `StartMarker`/`EndMarker`. If no token is found in `content`, return the first `MaxLength` characters with no markers. If `IncludeSnippet` is requested while `StoreContent = false`, `Snippet` is null (no throw).
 
 ---

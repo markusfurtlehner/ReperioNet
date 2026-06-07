@@ -74,6 +74,12 @@ done
   echo "substring recall; \`compact\` additionally stores no content copy (no snippets);"
   echo "\`smallest\` additionally drops phonetic codes and removes stop words from the stem stream."
   echo
+  echo "Multi-token queries default to all-terms (AND) semantics with an automatic any-term"
+  echo "fallback when fewer than Limit candidates match (\`SearchQueryOptions.TermMatch\`); the"
+  echo "latency battery shows both modes side by side. The gain grows with term selectivity —"
+  echo "this corpus's tiny synthetic vocabulary makes every term pathologically common, so the"
+  echo "all-terms numbers here are a lower bound."
+  echo
   echo "## Summary"
   echo
   echo "| run | profile | cores | index docs/s | optimize | content | db size | db/content | needle p50 | common-term p50 | concurrent qps | add | peak mem | smoke |"

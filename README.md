@@ -58,6 +58,14 @@ of them, merges by best bm25 rank, re-ranks the bounded candidate pool with fuzz
 (`0.6 * fuzzy + 0.4 * normalized bm25`, plus an exact-substring boost), then applies `MinScore`,
 paging and optional `<mark>`-style snippets. Scores are normalized to 0..1, higher is better.
 
+**Multi-token queries default to all-terms (AND) semantics** (`SearchQueryOptions.TermMatch`):
+documents must contain every base term, which matches the common user intent and is far cheaper to
+rank than OR (the intersection is small, and FTS5 must bm25-score every matching row). When the
+strict pass yields fewer candidates than `Limit`, an any-term pass widens recall automatically —
+fallback hits always rank after all-terms hits. Stem/phonetic variant matching and trigram
+substring recall keep their OR semantics in the fallback, so inflections and typos are still
+caught. Set `TermMatch = TermMatch.AnyTerms` for the widest recall up front.
+
 ## Options worth knowing
 
 - `StoreContent` (default on): stores one copy of the content — enables snippets and full-text fuzzy re-ranking.

@@ -223,8 +223,9 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
         ("common term, page offset 100", "invoice", new SearchQueryOptions { Offset = 100, Limit = 50 }),
         ("de stemmed inflection", "rechnungen", new SearchQueryOptions { Language = "de" }),
         ("de phonetic variant", "Witgenstain", new SearchQueryOptions { Language = "de" }),
-        ("multi-token OR", "monthly invoice payment", null),
-        ("multi-token with typo", "monthly invoce", null),
+        ("multi-token, all terms (default)", "monthly invoice payment", null),
+        ("multi-token, any term", "monthly invoice payment", new SearchQueryOptions { TermMatch = TermMatch.AnyTerms }),
+        ("multi-token with typo (fallback)", "monthly invoce", null),
         ("short query (prefix aid)", "re", null),
         ("no-match term", "zzzzqqqq", null),
     };

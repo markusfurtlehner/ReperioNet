@@ -22,40 +22,44 @@ internal static class Fts5Match
 
     /// <summary>
     /// Builds the full §9.5 match expression, OR-combining the column-scoped clauses that are
-    /// non-empty: <c>base : (...) OR stem : (...) OR phonetic : (...)</c>.
+    /// non-empty: <c>base : (...) OR stem : (...) OR phonetic : (...)</c>. With
+    /// <paramref name="allTermsBase"/> the base clause requires every token (implicit FTS5 AND:
+    /// <c>base : ("t1" "t2")</c>); stem/phonetic clauses always stay OR-combined — they exist to
+    /// catch variants and typos, and requiring all of them would over-restrict.
     /// </summary>
     internal static string BuildMatch(
         IReadOnlyList<string> baseTokens,
         bool prefixLastToken,
         IReadOnlyList<string>? stemTokens,
-        IReadOnlyList<string>? phoneticTokens)
+        IReadOnlyList<string>? phoneticTokens,
+        bool allTermsBase = false)
     {
         var builder = new StringBuilder();
-        AppendColumnClause(builder, "base", baseTokens, prefixLastToken);
+        AppendColumnClause(builder, "base", baseTokens, prefixLastToken, allTerms: allTermsBase);
 
         if (stemTokens is { Count: > 0 })
         {
             builder.Append(" OR ");
-            AppendColumnClause(builder, "stem", stemTokens, prefixLast: false);
+            AppendColumnClause(builder, "stem", stemTokens, prefixLast: false, allTerms: false);
         }
 
         if (phoneticTokens is { Count: > 0 })
         {
             builder.Append(" OR ");
-            AppendColumnClause(builder, "phonetic", phoneticTokens, prefixLast: false);
+            AppendColumnClause(builder, "phonetic", phoneticTokens, prefixLast: false, allTerms: false);
         }
 
         return builder.ToString();
     }
 
-    private static void AppendColumnClause(StringBuilder builder, string column, IReadOnlyList<string> tokens, bool prefixLast)
+    private static void AppendColumnClause(StringBuilder builder, string column, IReadOnlyList<string> tokens, bool prefixLast, bool allTerms)
     {
         builder.Append(column).Append(" : (");
         for (var i = 0; i < tokens.Count; i++)
         {
             if (i > 0)
             {
-                builder.Append(" OR ");
+                builder.Append(allTerms ? " " : " OR ");
             }
 
             builder.Append(EscapeToken(tokens[i]));

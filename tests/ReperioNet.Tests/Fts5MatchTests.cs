@@ -63,4 +63,20 @@ public class Fts5MatchTests
             "base : (\"ab\" OR \"ab\"*) OR stem : (\"ab\")",
             Fts5Match.BuildMatch(["ab"], prefixLastToken: true, ["ab"], null));
     }
+
+    [Fact]
+    public void BuildMatch_AllTermsBase_UsesImplicitAnd()
+    {
+        Assert.Equal(
+            "base : (\"t1\" \"t2\" \"t3\")",
+            Fts5Match.BuildMatch(["t1", "t2", "t3"], prefixLastToken: false, null, null, allTermsBase: true));
+    }
+
+    [Fact]
+    public void BuildMatch_AllTermsBase_StemAndPhoneticStayOrCombined()
+    {
+        Assert.Equal(
+            "base : (\"t1\" \"t2\") OR stem : (\"s1\" OR \"s2\") OR phonetic : (\"p1\" OR \"p2\")",
+            Fts5Match.BuildMatch(["t1", "t2"], prefixLastToken: false, ["s1", "s2"], ["p1", "p2"], allTermsBase: true));
+    }
 }
