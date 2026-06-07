@@ -165,6 +165,30 @@ public sealed class SnippetOptions
 }
 ```
 
+### Index profiles (presets)
+
+Two named presets in core (`ReperioProfiles`, extension methods on `ReperioOptions<TMeta>`) encode
+the benchmark-derived layout recommendations (`benchmarks/RESULTS.md`):
+
+```csharp
+public static ReperioOptions<TMeta> UseDesktopProfile<TMeta>(this ReperioOptions<TMeta> o);
+// EnableTrigram=true, StoreContent=true, EnablePhonetic=true, RemoveStopWords=false, MaxContentChars=0
+// (= the option defaults, made explicit/chainable)
+
+public static ReperioOptions<TMeta> UseMobileProfile<TMeta>(this ReperioOptions<TMeta> o);
+// EnableTrigram=false, StoreContent=true, EnablePhonetic=true, RemoveStopWords=true, MaxContentChars=4000
+```
+
+Rationale: dropping the trigram index (≈ half the database) improves size, query latency and
+indexing throughput together, losing only mid-word substring search; `StoreContent` stays on
+because §15.4 keeps the same text in `rank_text` when content is off (no size win, snippets lost);
+phonetic stays on (cheap, useful for variants); stop-word removal trims common-term cost in the
+stem/phonetic streams; `MaxContentChars` is the only lever below the rank_text floor (4000 is a
+tunable starting default). The mobile profile keeps typo tolerance (fuzzy), stemming, phonetic
+variants and the short-query prefix aid. The preset flags are persisted layout flags (§5): a
+profile switch on an existing database triggers the mismatch-throw — `RebuildAsync()` applies the
+new layout.
+
 ### Abstractions (namespace `ReperioNet.Abstractions`)
 
 ```csharp

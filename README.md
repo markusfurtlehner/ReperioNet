@@ -66,6 +66,35 @@ fallback hits always rank after all-terms hits. Stem/phonetic variant matching a
 substring recall keep their OR semantics in the fallback, so inflections and typos are still
 caught. Set `TermMatch = TermMatch.AnyTerms` for the widest recall up front.
 
+## Index profiles
+
+Two named presets capture the benchmark-derived recommendations (see
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md)); both are chainable extension methods on
+`ReperioOptions<TMeta>`:
+
+```csharp
+o.UseDesktopProfile();   // = the defaults: trigram + stored content + phonetic, unbounded text
+o.UseMobileProfile();    // trigram off, stop words removed, MaxContentChars = 4000
+```
+
+- **`UseDesktopProfile()`** — full fidelity. Mid-word substring search (trigram), snippets,
+  phonetic variants. Cost: the trigram index is roughly **half the database** (~4.4× raw content
+  on the benchmark corpus) and the slowest indexing.
+- **`UseMobileProfile()`** — the size/battery-conscious choice. Dropping the trigram index is the
+  one change that improves database size (~4.4× → ~2× raw content), query latency and indexing
+  throughput *together*. `StoreContent` stays **on** because it is free with respect to size — with
+  content off, the same text lives in `rank_text` for fuzzy re-ranking anyway, so turning it off
+  saves nothing and only costs snippets. Phonetic codes stay on (cheap, valuable for name
+  variants); stop words are removed from the stem/phonetic streams to trim common-term cost; and
+  `MaxContentChars = 4000` is the real lever below the rank_text floor for long bodies — a starting
+  default you should tune. **Lost:** mid-word substring search. **Kept:** typo tolerance (fuzzy
+  re-ranking over content/rank_text), word forms (stemming), phonetic variants, short-query prefix
+  matching, snippets.
+
+The flags these presets set are **persisted layout flags**: reopening an existing database with a
+different profile throws `ReperioException` (no silent rebuild) — open with the original options
+and call `RebuildAsync()` after changing flags, or start a new database file.
+
 ## Options worth knowing
 
 - `StoreContent` (default on): stores one copy of the content — enables snippets and full-text fuzzy re-ranking.
