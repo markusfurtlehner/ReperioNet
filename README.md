@@ -75,7 +75,9 @@ paging and optional `<mark>`-style snippets. Scores are normalized to 0..1, high
 - Minimum SQLite 3.43.0 with FTS5 — satisfied by the bundled `SQLitePCLRaw.bundle_e_sqlite3` engine
   (the only native artifact, prebuilt for all target platforms including iOS/Android).
 - `ReperioNet` and the language packs are trimming/AOT-clean (`net8.0`).
-  `ReperioNet.LanguageDetection` depends on NTextCat and is the optional, non-AOT-targeted piece.
+  `ReperioNet.LanguageDetection` depends on NTextCat (an unannotated `netstandard2.0` library
+  without a formal trim-compatibility guarantee); in practice the detection path publishes with
+  zero IL warnings under both `PublishTrimmed` and Native AOT and works in the resulting binary.
 
 ## Samples
 

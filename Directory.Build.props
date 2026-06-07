@@ -6,9 +6,9 @@
     <Authors>Markus Furtlehner</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageTags>search;fts5;sqlite;fuzzy;full-text-search;multilingual;embedded;cross-platform</PackageTags>
-    <RepositoryUrl>https://github.com/ittrail/ReperioNet</RepositoryUrl>
+    <RepositoryUrl>https://github.com/markusfurtlehner/ReperioNet</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageProjectUrl>https://github.com/ittrail/ReperioNet</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/markusfurtlehner/ReperioNet</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <!-- Deterministic build + SourceLink (built into the .NET 8 SDK) with snupkg symbols. -->
     <Deterministic>true</Deterministic>

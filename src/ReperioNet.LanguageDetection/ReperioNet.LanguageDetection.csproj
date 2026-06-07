@@ -8,6 +8,10 @@
     <Description>Automatic language detection for ReperioNet backed by NTextCat (bundled Core14 profile).</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- NTextCat is an unannotated netstandard2.0 dependency, but the full detection path was
+         verified empirically: PublishTrimmed and PublishAot (linux-x64) both complete with zero
+         IL warnings and the trimmed/native binary detects correctly. -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <ItemGroup>
