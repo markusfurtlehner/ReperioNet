@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ReperioNet.Languages.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ReperioNet\ReperioNet.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.De\ReperioNet.Languages.De.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.En\ReperioNet.Languages.En.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Fr\ReperioNet.Languages.Fr.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Es\ReperioNet.Languages.Es.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.It\ReperioNet.Languages.It.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Pt\ReperioNet.Languages.Pt.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Nl\ReperioNet.Languages.Nl.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Sv\ReperioNet.Languages.Sv.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.No\ReperioNet.Languages.No.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Da\ReperioNet.Languages.Da.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Fi\ReperioNet.Languages.Fi.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Ru\ReperioNet.Languages.Ru.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Hu\ReperioNet.Languages.Hu.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Ro\ReperioNet.Languages.Ro.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.Tr\ReperioNet.Languages.Tr.csproj" />
+  </ItemGroup>
+
+</Project>
