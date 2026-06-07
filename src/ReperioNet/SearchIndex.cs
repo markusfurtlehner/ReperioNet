@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using ReperioNet.Internal;
@@ -27,6 +28,8 @@ namespace ReperioNet;
 /// </remarks>
 public sealed class SearchIndex<TMeta> : IAsyncDisposable
 {
+    private const int AnalysisChunkSize = 256;
+
     private static readonly IReadOnlyList<SearchHit<TMeta>> EmptyHits = Array.Empty<SearchHit<TMeta>>();
 
     private readonly SqliteConnection _writeConnection;
@@ -41,6 +44,17 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         _connectionString = connectionString;
         _options = options;
     }
+
+    /// <summary>One fully analyzed document, ready for the §15.5 upsert.</summary>
+    private readonly record struct PreparedDocument(
+        string DocId,
+        string? Language,
+        string MetadataJson,
+        string RankText,
+        string? Content,
+        string BaseText,
+        string Stem,
+        string Phonetic);
 
     /// <summary>
     /// Opens (creating if necessary) the search index at <paramref name="databasePath"/>.
@@ -121,6 +135,15 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
     }
 
     /// <summary>Adds all <paramref name="entries"/> in one transaction, upserting by id.</summary>
+    /// <remarks>
+    /// The SQLite writes stay on the single dedicated write connection, but the text analysis
+    /// (tokenization, stemming, phonetic encoding, metadata serialization) runs in parallel across
+    /// CPU cores ahead of the writer, with stem/phonetic results memoized for the duration of the
+    /// batch. Entries are written strictly in input order (for duplicate ids the last one wins).
+    /// Because of this, <see cref="Abstractions.IStemmer"/>, <see cref="Abstractions.IPhoneticEncoder"/>,
+    /// <see cref="Abstractions.IStopWordFilter"/> and <see cref="Abstractions.ILanguageDetector"/>
+    /// implementations must be thread-safe (all bundled implementations are).
+    /// </remarks>
     /// <param name="entries">The documents to index.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <exception cref="ArgumentException">An entry has an empty <see cref="SearchEntry{TMeta}.Id"/> (the whole batch is rolled back).</exception>
@@ -259,40 +282,112 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
 
     // ---- Write pipeline ------------------------------------------------------------------------
 
-    /// <summary>Indexes entries inside one transaction on the dedicated write connection (PRD §6, §15.4, §15.5).</summary>
+    /// <summary>
+    /// Indexes entries inside one transaction on the dedicated write connection (PRD §6, §15.4,
+    /// §15.5). SQLite remains single-writer, but the pure-C# analysis (tokenize, stem, phonetic
+    /// encode, metadata serialization) is parallelized chunk-by-chunk ahead of the writer; chunks
+    /// are written strictly in input order, so duplicate-id "last wins" semantics are unchanged.
+    /// Bulk batches additionally run with a temporarily enlarged page cache and WAL checkpoint
+    /// threshold, restored when the batch ends.
+    /// </summary>
     private void WriteEntries(IEnumerable<SearchEntry<TMeta>> entries, string paramName, CancellationToken ct)
     {
+        var singleEntry = entries is SearchEntry<TMeta>[] { Length: 1 };
+        using var tuning = singleEntry ? null : BulkWriteTuning.Apply(_writeConnection);
         using var transaction = _writeConnection.BeginTransaction();
         using var batch = new UpsertBatch(_writeConnection, transaction, _options.EnableTrigram);
+        var cache = singleEntry ? null : new AnalysisCache(_options.Analyzers);
 
-        foreach (var entry in entries)
+        foreach (var chunk in ReadChunks(entries, ct))
         {
-            ct.ThrowIfCancellationRequested();
-            ValidateEntry(entry, paramName);
+            PreparedDocument[] prepared;
+            if (chunk.Count == 1)
+            {
+                prepared = [PrepareDocument(chunk[0], paramName, cache)];
+            }
+            else
+            {
+                prepared = new PreparedDocument[chunk.Count];
+                try
+                {
+                    Parallel.For(
+                        0,
+                        chunk.Count,
+                        new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Environment.ProcessorCount },
+                        i => prepared[i] = PrepareDocument(chunk[i], paramName, cache));
+                }
+                catch (AggregateException ex) when (ex.InnerExceptions.Count > 0)
+                {
+                    // Surface the original exception type (e.g. ArgumentException for an invalid
+                    // entry) exactly as the sequential pipeline did.
+                    ExceptionDispatchInfo.Capture(ex.InnerExceptions[0]).Throw();
+                    throw;
+                }
+            }
 
-            // §6.2: apply MaxContentChars before any processing.
-            var text = ApplyMaxContentChars(entry.Content ?? string.Empty);
-
-            // §6.3: resolve language (may stay null).
-            var language = entry.Language ?? _options.LanguageDetector?.Detect(text) ?? _options.DefaultLanguage;
-
-            // §6.4–6.5: derive the stem/phonetic streams with the language's analyzer (or fallback).
-            var (stem, phonetic) = ComputeStreams(language, text);
-
-            // §15.4 column values (binding): raw text goes into base; rank_text holds the text only
-            // when content is not stored (no duplicate full-text storage).
-            batch.Upsert(
-                docId: entry.Id,
-                language: language,
-                metadataJson: JsonSerializer.Serialize(entry.Metadata, _options.MetadataTypeInfo),
-                rankText: _options.StoreContent ? string.Empty : text,
-                content: _options.StoreContent ? text : null,
-                baseText: text,
-                stem: stem,
-                phonetic: phonetic);
+            foreach (var document in prepared)
+            {
+                batch.Upsert(
+                    document.DocId,
+                    document.Language,
+                    document.MetadataJson,
+                    document.RankText,
+                    document.Content,
+                    document.BaseText,
+                    document.Stem,
+                    document.Phonetic);
+            }
         }
 
         transaction.Commit();
+    }
+
+    /// <summary>The §6 analysis pipeline for one entry; safe to run concurrently across entries.</summary>
+    private PreparedDocument PrepareDocument(SearchEntry<TMeta> entry, string paramName, AnalysisCache? cache)
+    {
+        ValidateEntry(entry, paramName);
+
+        // §6.2: apply MaxContentChars before any processing.
+        var text = ApplyMaxContentChars(entry.Content ?? string.Empty);
+
+        // §6.3: resolve language (may stay null).
+        var language = entry.Language ?? _options.LanguageDetector?.Detect(text) ?? _options.DefaultLanguage;
+
+        // §6.4–6.5: derive the stem/phonetic streams with the language's analyzer (or fallback).
+        var (stem, phonetic) = ComputeStreams(language, text, cache);
+
+        // §15.4 column values (binding): raw text goes into base; rank_text holds the text only
+        // when content is not stored (no duplicate full-text storage).
+        return new PreparedDocument(
+            entry.Id,
+            language,
+            JsonSerializer.Serialize(entry.Metadata, _options.MetadataTypeInfo),
+            _options.StoreContent ? string.Empty : text,
+            _options.StoreContent ? text : null,
+            text,
+            stem,
+            phonetic);
+    }
+
+    /// <summary>Buffers the input into analysis chunks, honoring cancellation per entry as before.</summary>
+    private static IEnumerable<List<SearchEntry<TMeta>>> ReadChunks(IEnumerable<SearchEntry<TMeta>> entries, CancellationToken ct)
+    {
+        var buffer = new List<SearchEntry<TMeta>>(AnalysisChunkSize);
+        foreach (var entry in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            buffer.Add(entry);
+            if (buffer.Count == AnalysisChunkSize)
+            {
+                yield return buffer;
+                buffer = new List<SearchEntry<TMeta>>(AnalysisChunkSize);
+            }
+        }
+
+        if (buffer.Count > 0)
+        {
+            yield return buffer;
+        }
     }
 
     private bool RemoveCore(string id)
@@ -411,9 +506,10 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             insertTrigram.Prepare();
         }
 
+        var cache = new AnalysisCache(_options.Analyzers);
         foreach (var (rowid, language, text) in rows)
         {
-            var (stem, phonetic) = ComputeStreams(language, text);
+            var (stem, phonetic) = ComputeStreams(language, text, cache);
 
             insertFts.Parameters["@rowid"].Value = rowid;
             insertFts.Parameters["@base"].Value = text;
@@ -433,14 +529,14 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
     }
 
     /// <summary>Derives the space-joined stem/phonetic streams for a document (§6.4–6.5).</summary>
-    private (string Stem, string Phonetic) ComputeStreams(string? language, string text)
+    private (string Stem, string Phonetic) ComputeStreams(string? language, string text, AnalysisCache? cache = null)
     {
         if (!_options.EnableStemming && !_options.EnablePhonetic)
         {
             return (string.Empty, string.Empty);
         }
 
-        var analyzer = Analysis.Resolve(_options.Analyzers, language);
+        var analyzer = cache is null ? Analysis.Resolve(_options.Analyzers, language) : cache.Resolve(language);
         var tokens = Tokenizer.Tokenize(text);
         var stem = _options.EnableStemming
             ? string.Join(' ', Analysis.StemTokens(analyzer, tokens, _options.RemoveStopWords))

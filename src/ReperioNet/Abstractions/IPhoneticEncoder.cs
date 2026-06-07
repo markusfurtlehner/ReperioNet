@@ -1,6 +1,7 @@
 namespace ReperioNet.Abstractions;
 
 /// <summary>Encodes a token into a phonetic key (e.g. Kölner Phonetik, Double Metaphone).</summary>
+/// <remarks>Implementations must be thread-safe: ReperioNet calls <see cref="Encode"/> concurrently from parallel searches and bulk indexing.</remarks>
 public interface IPhoneticEncoder
 {
     /// <summary>Returns the phonetic code for <paramref name="token"/>, or <see langword="null"/> if the token is not encodable.</summary>

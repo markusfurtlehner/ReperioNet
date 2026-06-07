@@ -12,17 +12,30 @@ using ReperioNet.Languages.All;
 //   --batch N       documents per AddRangeAsync transaction (default 25,000)
 //   --iters N       timed iterations per query pattern (default 20)
 //   --db PATH       database file (default /tmp/reperionet-bench/index.db)
+//   --profile P     index layout profile: full | no-trigram | compact | smallest (default full)
+//   --label TEXT    run label used in reports (default: profile name)
+//   --md BASEPATH   append results to BASEPATH.summary.md (one table row) and
+//                   BASEPATH.details.md (a full section) for report assembly
 //   --skip-index    reuse an existing database (skip generation + indexing)
 //   --keep          keep the database file afterwards
-//   --no-trigram    build without the trigram index (smaller/faster, no substring recall)
+//   --no-trigram    legacy alias: force the trigram index off
+//
+// Profiles (PRD §5 layout flags; each yields a different database size):
+//   full        trigram + stemming + phonetic + stored content   (best recall, biggest db)
+//   no-trigram  no substring recall                              (smaller)
+//   compact     additionally StoreContent=false                  (no snippets, fuzzy uses rank_text)
+//   smallest    additionally no phonetic + stop words removed    (smallest db)
 
 var docs = 1_000_000L;
 var batch = 25_000;
 var iters = 20;
 var dbPath = "/tmp/reperionet-bench/index.db";
+var profile = "full";
+string? label = null;
+string? mdBase = null;
 var skipIndex = false;
 var keep = false;
-var trigram = true;
+var trigramOverride = (bool?)null;
 for (var a = 0; a < args.Length; a++)
 {
     switch (args[a])
@@ -31,12 +44,26 @@ for (var a = 0; a < args.Length; a++)
         case "--batch": batch = int.Parse(args[++a]); break;
         case "--iters": iters = int.Parse(args[++a]); break;
         case "--db": dbPath = args[++a]; break;
+        case "--profile": profile = args[++a]; break;
+        case "--label": label = args[++a]; break;
+        case "--md": mdBase = args[++a]; break;
         case "--skip-index": skipIndex = true; break;
         case "--keep": keep = true; break;
-        case "--no-trigram": trigram = false; break;
+        case "--no-trigram": trigramOverride = false; break;
         default: Console.Error.WriteLine($"unknown arg {args[a]}"); return 2;
     }
 }
+
+var (trigram, storeContent, phonetic, removeStopWords) = profile switch
+{
+    "full" => (true, true, true, false),
+    "no-trigram" => (false, true, true, false),
+    "compact" => (false, false, true, false),
+    "smallest" => (false, false, false, true),
+    _ => throw new ArgumentException($"unknown profile '{profile}'"),
+};
+trigram = trigramOverride ?? trigram;
+label ??= profile;
 
 Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
 if (!skipIndex)
@@ -47,13 +74,21 @@ if (!skipIndex)
     }
 }
 
-Console.WriteLine($"ReperioNet benchmark — docs={docs:N0} batch={batch:N0} iters={iters} trigram={trigram}");
+var (cpuModel, cpuMhz) = CpuInfo();
+Console.WriteLine($"ReperioNet benchmark — label={label} profile={profile} docs={docs:N0} batch={batch:N0} iters={iters}");
+Console.WriteLine($"layout: trigram={trigram} storeContent={storeContent} phonetic={phonetic} removeStopWords={removeStopWords}");
+Console.WriteLine($"cpu: {Environment.ProcessorCount} usable core(s), {cpuModel} @ {cpuMhz} MHz");
 Console.WriteLine($"db: {dbPath}");
 Console.WriteLine();
 
 var total = Stopwatch.StartNew();
 var failures = 0;
 var contentBytes = 0L;
+var indexDocsPerSecond = 0d;
+var optimizeSeconds = 0d;
+double concurrentQps;
+double addMs, removeMs;
+var latencyRows = new List<(string Name, int Hits, double Cold, double P50, double P95, double Max)>();
 
 await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
 {
@@ -61,6 +96,9 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
     o.AddAllEuropeanLanguages();
     o.DefaultLanguage = "en";
     o.EnableTrigram = trigram;
+    o.StoreContent = storeContent;
+    o.EnablePhonetic = phonetic;
+    o.RemoveStopWords = removeStopWords;
 }))
 {
     // ---- Phase 1: bulk indexing -------------------------------------------------------------
@@ -103,12 +141,13 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
             "en"));
 
         indexing.Stop();
-        var rate = docs / indexing.Elapsed.TotalSeconds;
-        Console.WriteLine($"  indexed {docs:N0} docs (+3 planted) in {indexing.Elapsed:hh\\:mm\\:ss} = {rate:N0} docs/s");
+        indexDocsPerSecond = docs / indexing.Elapsed.TotalSeconds;
+        Console.WriteLine($"  indexed {docs:N0} docs (+3 planted) in {indexing.Elapsed:hh\\:mm\\:ss} = {indexDocsPerSecond:N0} docs/s");
 
         var optimize = Stopwatch.StartNew();
         await index.OptimizeAsync();
-        Console.WriteLine($"  OptimizeAsync: {optimize.Elapsed.TotalSeconds:N1} s");
+        optimizeSeconds = optimize.Elapsed.TotalSeconds;
+        Console.WriteLine($"  OptimizeAsync: {optimizeSeconds:N1} s");
     }
     else
     {
@@ -134,16 +173,22 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
     var needleRanked = await index.SearchAsync(needleQuery);
     Check(needleRanked.Count >= 1 && needleRanked[0].Id == needleId, "needle uid ranks #1 despite phonetic-code collisions");
 
-    var snippet = await index.SearchAsync(
-        needleQuery,
-        new SearchQueryOptions { IncludeSnippet = true, EnablePhonetic = false });
-    Check(snippet.Count == 1 && snippet[0].Snippet?.Contains("<mark>") == true, "needle snippet contains <mark>");
+    if (storeContent)
+    {
+        var snippet = await index.SearchAsync(
+            needleQuery,
+            new SearchQueryOptions { IncludeSnippet = true, EnablePhonetic = false });
+        Check(snippet.Count == 1 && snippet[0].Snippet?.Contains("<mark>") == true, "needle snippet contains <mark>");
+    }
 
     var stem = await index.SearchAsync("Verlängerung", new SearchQueryOptions { Language = "de" });
     Check(stem.Any(h => h.Id == "special-stem"), "de stemming: Verlängerung -> Verlängerungen");
 
-    var phon = await index.SearchAsync("Witgenstain", new SearchQueryOptions { Language = "de" });
-    Check(phon.Any(h => h.Id == "special-phon"), "de phonetic: Witgenstain -> Wittgenstein");
+    if (phonetic)
+    {
+        var phon = await index.SearchAsync("Witgenstain", new SearchQueryOptions { Language = "de" });
+        Check(phon.Any(h => h.Id == "special-phon"), "de phonetic: Witgenstain -> Wittgenstein");
+    }
 
     if (trigram)
     {
@@ -200,9 +245,10 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
         }
 
         Array.Sort(samples);
-        Console.WriteLine(
-            $"  {name,-34} {hits,6} {cold,7:N1}ms {Percentile(samples, 50),7:N1}ms " +
-            $"{Percentile(samples, 95),7:N1}ms {samples[^1],7:N1}ms");
+        var p50 = Percentile(samples, 50);
+        var p95 = Percentile(samples, 95);
+        latencyRows.Add((name, hits, cold, p50, p95, samples[^1]));
+        Console.WriteLine($"  {name,-34} {hits,6} {cold,7:N1}ms {p50,7:N1}ms {p95,7:N1}ms {samples[^1],7:N1}ms");
     }
 
     Console.WriteLine();
@@ -220,7 +266,8 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
         }
     })));
     concurrent.Stop();
-    Console.WriteLine($"  200 queries in {concurrent.Elapsed.TotalSeconds:N1} s = {200 / concurrent.Elapsed.TotalSeconds:N0} queries/s");
+    concurrentQps = 200 / concurrent.Elapsed.TotalSeconds;
+    Console.WriteLine($"  200 queries in {concurrent.Elapsed.TotalSeconds:N1} s = {concurrentQps:N1} queries/s");
     Console.WriteLine();
 
     // ---- Phase 5: mutations against the full index ------------------------------------------
@@ -237,10 +284,13 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
         removeTimes[k] = await TimeAsync(() => index.RemoveAsync($"mail-{docs + 100 + k:D7}"));
     }
 
-    Console.WriteLine($"  AddAsync (upsert): {addTimes.Average():N1} ms   RemoveAsync: {removeTimes.Average():N1} ms");
+    addMs = addTimes.Average();
+    removeMs = removeTimes.Average();
+    Console.WriteLine($"  AddAsync (upsert): {addMs:N1} ms   RemoveAsync: {removeMs:N1} ms");
 }
 
 var dbBytes = new[] { "", "-wal", "-shm" }.Sum(s => File.Exists(dbPath + s) ? new FileInfo(dbPath + s).Length : 0);
+var peakRss = PeakRssBytes();
 Console.WriteLine();
 if (contentBytes > 0)
 {
@@ -257,7 +307,44 @@ else
     Console.WriteLine($"database size: {dbBytes:N0} bytes ({dbBytes / 1024.0 / 1024.0 / 1024.0:N2} GiB)");
 }
 
+Console.WriteLine($"peak process memory: {peakRss / 1024.0 / 1024.0:N0} MiB");
 Console.WriteLine($"total wall time: {total.Elapsed:hh\\:mm\\:ss}");
+
+if (mdBase is not null)
+{
+    var smoke = failures == 0 ? "pass" : $"FAIL ({failures})";
+    var ratio = contentBytes > 0 ? $"{(double)dbBytes / contentBytes:N2}x" : "n/a";
+    var needleP50 = latencyRows.First(r => r.Name.StartsWith("needle, phonetic off")).P50;
+    var commonP50 = latencyRows.First(r => r.Name.StartsWith("common term (~")).P50;
+
+    File.AppendAllText(
+        mdBase + ".summary.md",
+        $"| {label} | {profile} | {Environment.ProcessorCount} | {indexDocsPerSecond:N0} | {optimizeSeconds:N1} s " +
+        $"| {contentBytes / 1024.0 / 1024.0:N1} MiB | {dbBytes / 1024.0 / 1024.0:N1} MiB | {ratio} " +
+        $"| {needleP50:N1} ms | {commonP50:N1} ms | {concurrentQps:N1} | {addMs:N1} ms | {peakRss / 1024.0 / 1024.0:N0} MiB | {smoke} |\n");
+
+    var details = new StringBuilder();
+    details.AppendLine($"### {label}");
+    details.AppendLine();
+    details.AppendLine($"- profile: `{profile}` (trigram={trigram}, storeContent={storeContent}, phonetic={phonetic}, removeStopWords={removeStopWords})");
+    details.AppendLine($"- usable cores: {Environment.ProcessorCount} ({cpuModel} @ {cpuMhz} MHz)");
+    details.AppendLine($"- documents: {docs:N0} (+3 planted), batch size {batch:N0}");
+    details.AppendLine($"- indexing: **{indexDocsPerSecond:N0} docs/s**, OptimizeAsync {optimizeSeconds:N1} s");
+    details.AppendLine($"- raw content: {contentBytes:N0} bytes ({contentBytes / 1024.0 / 1024.0:N1} MiB) — database: {dbBytes:N0} bytes ({dbBytes / 1024.0 / 1024.0:N1} MiB) — **ratio {ratio}**");
+    details.AppendLine($"- peak process memory: {peakRss / 1024.0 / 1024.0:N0} MiB");
+    details.AppendLine($"- concurrent throughput: {concurrentQps:N1} queries/s (8 workers) — AddAsync {addMs:N1} ms, RemoveAsync {removeMs:N1} ms");
+    details.AppendLine($"- smoke checks: {smoke}");
+    details.AppendLine();
+    details.AppendLine("| pattern | hits | cold | p50 | p95 | max |");
+    details.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: |");
+    foreach (var (name, hits, cold, p50, p95, max) in latencyRows)
+    {
+        details.AppendLine($"| {name} | {hits} | {cold:N1} ms | {p50:N1} ms | {p95:N1} ms | {max:N1} ms |");
+    }
+
+    details.AppendLine();
+    File.AppendAllText(mdBase + ".details.md", details.ToString());
+}
 
 if (!keep)
 {
@@ -288,3 +375,55 @@ static async Task<double> TimeAsync(Func<Task> action)
 
 static double Percentile(double[] sorted, int percentile)
     => sorted[Math.Min(sorted.Length - 1, (int)Math.Ceiling(percentile / 100.0 * sorted.Length) - 1)];
+
+static long PeakRssBytes()
+{
+    try
+    {
+        foreach (var line in File.ReadLines("/proc/self/status"))
+        {
+            if (line.StartsWith("VmHWM:", StringComparison.Ordinal))
+            {
+                var kib = long.Parse(line[6..].Trim().TrimEnd('k', 'B', ' '));
+                return kib * 1024;
+            }
+        }
+    }
+    catch (IOException)
+    {
+        // Not on Linux or /proc unavailable.
+    }
+
+    return Environment.WorkingSet;
+}
+
+static (string Model, string Mhz) CpuInfo()
+{
+    var model = "unknown";
+    var mhz = "unknown";
+    try
+    {
+        foreach (var line in File.ReadLines("/proc/cpuinfo"))
+        {
+            if (model == "unknown" && line.StartsWith("model name", StringComparison.Ordinal))
+            {
+                model = line[(line.IndexOf(':') + 1)..].Trim();
+            }
+            else if (mhz == "unknown" && line.StartsWith("cpu MHz", StringComparison.Ordinal))
+            {
+                mhz = line[(line.IndexOf(':') + 1)..].Trim();
+            }
+
+            if (model != "unknown" && mhz != "unknown")
+            {
+                break;
+            }
+        }
+    }
+    catch (IOException)
+    {
+        // Not on Linux or /proc unavailable.
+    }
+
+    return (model, mhz);
+}

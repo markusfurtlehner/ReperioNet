@@ -66,6 +66,51 @@ paging and optional `<mark>`-style snippets. Scores are normalized to 0..1, high
 - `MaxContentChars` (default 0 = unbounded): caps the indexed text length.
 - `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`.
 
+## Bulk indexing
+
+`AddRangeAsync` indexes the whole batch in **one transaction** and is heavily optimized for large
+loads: SQLite writes stay on the single dedicated write connection (SQLite is single-writer by
+nature), but the text analysis — tokenization, stemming, phonetic encoding, metadata
+serialization — runs **in parallel across CPU cores** ahead of the writer, with stem/phonetic
+results memoized for the duration of the batch. During a bulk batch the write connection also runs
+with a temporarily enlarged page cache (32 MiB) and a raised WAL checkpoint threshold, both
+restored when the batch completes. Entries are written strictly in input order (for duplicate ids
+the last one wins), and an invalid entry rolls back the entire batch.
+
+One contract follows from this: `IStemmer`, `IPhoneticEncoder`, `IStopWordFilter` and
+`ILanguageDetector` implementations must be **thread-safe** (all bundled implementations are; they
+keep no mutable state).
+
+Practical tips for big loads: prefer one large `AddRangeAsync` over many `AddAsync` calls, pass
+batches of ~10k–50k entries per call for progress reporting, call `OptimizeAsync()` once at the
+end, and consider the index-layout options below — the trigram index is the dominant cost in both
+indexing time and database size.
+
+## Benchmarks
+
+`benchmarks/ReperioNet.Benchmark` is a combined scale smoke test and benchmark. It generates
+deterministic email-like documents (~860 bytes, en/de/fr mix), bulk-indexes them, asserts
+correctness at scale (needle recall and ranking, stemming, phonetic, substring, snippets, CRUD
+consistency), then measures a search-latency battery (cold + p50/p95/max), concurrent throughput,
+single-document mutation latency, peak process memory and raw-content-vs-database size.
+
+```bash
+# single run (defaults: 1,000,000 docs, profile "full")
+dotnet run -c Release --project benchmarks/ReperioNet.Benchmark -- --docs 100000
+
+# full matrix: 4 index-layout profiles x 3 simulated device classes -> benchmarks/RESULTS.md
+benchmarks/run-matrix.sh 100000
+```
+
+Index-layout profiles (`--profile`): `full` (trigram + stemming + phonetic + stored content — best
+recall, biggest database), `no-trigram` (drops substring recall), `compact` (additionally stores no
+content copy — no snippets, fuzzy re-ranks on `rank_text`), `smallest` (additionally no phonetic
+codes, stop words removed from the stem stream). Device classes are simulated by restricting CPU
+affinity (`taskset`): desktop (all cores), fast phone (4 cores), slow phone (2 cores) — note this
+models reduced parallelism, not slower silicon or flash storage. Results, including the exact CPU,
+memory consumption and db/content ratios for every combination, are checked in at
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+
 ## Operational notes
 
 - **Local storage only**: the index uses SQLite WAL journaling, which is unsafe on network file
