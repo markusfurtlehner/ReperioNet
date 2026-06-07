@@ -12,8 +12,12 @@ internal static class Fts5Match
     internal static string EscapeToken(string token)
         => "\"" + token.Replace("\"", "\"\"") + "\"";
 
-    /// <summary>Builds the Milestone-2 base-only match expression: <c>base : ("t1" OR "t2" OR ...)</c>.</summary>
-    internal static string BuildBaseMatch(IReadOnlyList<string> tokens)
+    /// <summary>
+    /// Builds the base-column match expression: <c>base : ("t1" OR "t2" OR ...)</c>. With
+    /// <paramref name="prefixLastToken"/> (the §9.5 short-query aid for queries shorter than three
+    /// characters), an FTS5 prefix term on the last token is OR-appended: <c>OR "tN"*</c>.
+    /// </summary>
+    internal static string BuildBaseMatch(IReadOnlyList<string> tokens, bool prefixLastToken = false)
     {
         var builder = new StringBuilder("base : (");
         for (var i = 0; i < tokens.Count; i++)
@@ -24,6 +28,11 @@ internal static class Fts5Match
             }
 
             builder.Append(EscapeToken(tokens[i]));
+        }
+
+        if (prefixLastToken && tokens.Count > 0)
+        {
+            builder.Append(" OR ").Append(EscapeToken(tokens[^1])).Append('*');
         }
 
         return builder.Append(')').ToString();

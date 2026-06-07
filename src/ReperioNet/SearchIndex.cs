@@ -394,61 +394,139 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
 
     // ---- Read pipeline -------------------------------------------------------------------------
 
-    /// <summary>Milestone-2 base-only search (PRD §15.6, binding).</summary>
+    /// <summary>Candidate-pool search: base MATCH + trigram recall, merged by rowid (PRD §9.5–9.9).</summary>
     private IReadOnlyList<SearchHit<TMeta>> SearchCore(SqliteConnection connection, string query, SearchQueryOptions options)
     {
+        // §9.3: tokenize the query (base terms only until M5 adds stem/phonetic).
         var tokens = Tokenizer.Tokenize(query);
-        if (tokens.Count == 0)
+
+        // §9.6/§10: trigram recall only for queries of three or more characters.
+        var useTrigram = _options.EnableTrigram && query.Length >= 3;
+        if (tokens.Count == 0 && !useTrigram)
         {
             return EmptyHits;
         }
 
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT d.doc_id, d.metadata, bm25(documents_fts) AS rank
-            FROM documents_fts f
-            JOIN documents d ON d.rowid = f.rowid
-            WHERE documents_fts MATCH @match
-            ORDER BY rank
-            LIMIT @limit OFFSET @offset;
-            """;
-        command.Parameters.AddWithValue("@match", Fts5Match.BuildBaseMatch(tokens));
-        command.Parameters.AddWithValue("@limit", options.Limit);
-        command.Parameters.AddWithValue("@offset", options.Offset);
-
-        var rows = new List<(string DocId, string MetadataJson, double Rank)>();
-        using (var reader = command.ExecuteReader())
+        // §9.7: gather candidates from both MATCH queries; merge by rowid keeping the best (lowest)
+        // bm25 seen for that rowid.
+        var bestRank = new Dictionary<long, double>();
+        if (tokens.Count > 0)
         {
-            while (reader.Read())
-            {
-                rows.Add((reader.GetString(0), reader.GetString(1), reader.GetDouble(2)));
-            }
+            // §9.5: base clause, plus the short-query prefix aid when the whole query is < 3 chars.
+            var match = Fts5Match.BuildBaseMatch(tokens, prefixLastToken: query.Length < 3);
+            CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, bestRank);
         }
 
-        if (rows.Count == 0)
+        if (useTrigram)
+        {
+            // §9.6: the escaped full query string against the trigram table (substring recall).
+            CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, bestRank);
+        }
+
+        if (bestRank.Count == 0)
         {
             return EmptyHits;
         }
 
-        // §9.9 normalization over the returned page: bm25 is lower-is-better, best row maps to 1.0.
-        var min = rows[0].Rank;
-        var max = rows[0].Rank;
-        foreach (var row in rows)
+        // Keep the top CandidatePoolSize rowids ordered by bm25, lowest first (§9.7).
+        var pool = bestRank
+            .OrderBy(candidate => candidate.Value)
+            .ThenBy(candidate => candidate.Key)
+            .Take(options.CandidatePoolSize)
+            .Select(candidate => (Rowid: candidate.Key, Rank: candidate.Value))
+            .ToList();
+
+        if (pool.Count == 0)
         {
-            min = Math.Min(min, row.Rank);
-            max = Math.Max(max, row.Rank);
+            return EmptyHits;
         }
 
-        var hits = new List<SearchHit<TMeta>>(rows.Count);
-        foreach (var (docId, metadataJson, rank) in rows)
+        // §9.8: load the candidates' documents. (rank_text/content join the load with fuzzy in M4.)
+        var documents = LoadDocuments(connection, pool.Select(candidate => candidate.Rowid));
+
+        // §9.9: normalize bm25 across the pool (lower is better; best maps to 1.0).
+        var min = pool[0].Rank;
+        var max = pool[0].Rank;
+        foreach (var candidate in pool)
+        {
+            min = Math.Min(min, candidate.Rank);
+            max = Math.Max(max, candidate.Rank);
+        }
+
+        // Order by score desc == bm25 asc (normalization is monotonic), doc_id asc as the stable
+        // tiebreaker; then page. Metadata is deserialized only for the returned page.
+        var page = pool
+            .Where(candidate => documents.ContainsKey(candidate.Rowid))
+            .Select(candidate => (candidate.Rank, Doc: documents[candidate.Rowid]))
+            .OrderBy(candidate => candidate.Rank)
+            .ThenBy(candidate => candidate.Doc.DocId, StringComparer.Ordinal)
+            .Skip(Math.Max(0, options.Offset))
+            .Take(Math.Max(0, options.Limit));
+
+        var hits = new List<SearchHit<TMeta>>();
+        foreach (var (rank, doc) in page)
         {
             var score = max > min ? (max - rank) / (max - min) : 1.0;
-            var metadata = JsonSerializer.Deserialize(metadataJson, _options.MetadataTypeInfo)!;
-            hits.Add(new SearchHit<TMeta>(docId, metadata, score));
+            var metadata = JsonSerializer.Deserialize(doc.MetadataJson, _options.MetadataTypeInfo)!;
+            hits.Add(new SearchHit<TMeta>(doc.DocId, metadata, score));
         }
 
         return hits;
+    }
+
+    /// <summary>Runs one MATCH query and merges (rowid, bm25) results into <paramref name="bestRank"/>, keeping the lowest bm25 per rowid.</summary>
+    private static void CollectCandidates(
+        SqliteConnection connection,
+        string table,
+        string match,
+        int poolSize,
+        Dictionary<long, double> bestRank)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match ORDER BY rank, rowid LIMIT @pool;";
+        command.Parameters.AddWithValue("@match", match);
+        command.Parameters.AddWithValue("@pool", poolSize);
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var rowid = reader.GetInt64(0);
+            var rank = reader.GetDouble(1);
+            if (!bestRank.TryGetValue(rowid, out var existing) || rank < existing)
+            {
+                bestRank[rowid] = rank;
+            }
+        }
+    }
+
+    /// <summary>Loads <c>doc_id</c> and metadata JSON for the candidate rowids (chunked IN queries).</summary>
+    private static Dictionary<long, (string DocId, string MetadataJson)> LoadDocuments(
+        SqliteConnection connection,
+        IEnumerable<long> rowids)
+    {
+        var documents = new Dictionary<long, (string, string)>();
+        foreach (var chunk in rowids.Chunk(500))
+        {
+            using var command = connection.CreateCommand();
+            var names = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                names[i] = "@r" + i;
+                command.Parameters.AddWithValue(names[i], chunk[i]);
+            }
+
+            command.CommandText =
+                $"SELECT rowid, doc_id, metadata FROM documents WHERE rowid IN ({string.Join(", ", names)});";
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                documents[reader.GetInt64(0)] = (reader.GetString(1), reader.GetString(2));
+            }
+        }
+
+        return documents;
     }
 
     // ---- Plumbing ------------------------------------------------------------------------------

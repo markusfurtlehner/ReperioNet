@@ -28,4 +28,13 @@ public class Fts5MatchTests
     {
         Assert.Equal("base : (\"foo\" OR \"bar\" OR \"42\")", Fts5Match.BuildBaseMatch(["foo", "bar", "42"]));
     }
+
+    [Fact]
+    public void BuildBaseMatch_PrefixAid_AppendsPrefixTermOnLastToken()
+    {
+        Assert.Equal("base : (\"ab\" OR \"ab\"*)", Fts5Match.BuildBaseMatch(["ab"], prefixLastToken: true));
+        Assert.Equal(
+            "base : (\"a\" OR \"b\" OR \"b\"*)",
+            Fts5Match.BuildBaseMatch(["a", "b"], prefixLastToken: true));
+    }
 }
