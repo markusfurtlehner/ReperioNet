@@ -65,6 +65,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: pack
     runs-on: ubuntu-latest
+    # Must match the nuget.org trusted publishing policy
+    # (repository markusfurtlehner/ReperioNet, workflow ci.yml, environment production).
+    environment: production
+    permissions:
+      id-token: write   # OIDC token for the trusted-publishing exchange
+      contents: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -73,7 +79,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: NuGet login (trusted publishing, OIDC -> short-lived key)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: markusfurtlehner
       - name: Push (nupkg + snupkg)
         run: >
-          dotnet nuget push "packages/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}"
+          dotnet nuget push "packages/*.nupkg" --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
           --source https://api.nuget.org/v3/index.json --skip-duplicate
