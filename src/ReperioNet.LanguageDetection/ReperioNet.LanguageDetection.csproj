@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ReperioNet.LanguageDetection</RootNamespace>
+    <Description>Automatic language detection for ReperioNet backed by NTextCat (bundled Core14 profile).</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
@@ -19,8 +20,13 @@
 
   <ItemGroup>
     <!-- Vendored from the NTextCat 0.3.65 nupkg (MIT): the package ships the profile only under
-         the legacy content/ folder, which does not flow to PackageReference consumers. -->
-    <None Include="LanguageModels\Core14.profile.xml" CopyToOutputDirectory="PreserveNewest" />
+         the legacy content/ folder, which does not flow to PackageReference consumers. Packed as
+         contentFiles with copy-to-output so NuGet consumers get it next to their binaries too. -->
+    <None Include="LanguageModels\Core14.profile.xml"
+          CopyToOutputDirectory="PreserveNewest"
+          Pack="true"
+          PackagePath="contentFiles\any\any\LanguageModels"
+          PackageCopyToOutput="true" />
   </ItemGroup>
 
 </Project>

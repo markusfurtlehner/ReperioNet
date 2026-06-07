@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ReperioNet.Languages.All</RootNamespace>
+    <Description>Meta-package registering all fifteen European ReperioNet language packs via AddAllEuropeanLanguages().</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsAotCompatible>true</IsAotCompatible>

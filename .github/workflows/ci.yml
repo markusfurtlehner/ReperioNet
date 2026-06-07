@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore
+      - name: Build
+        run: dotnet build -c Release --no-restore
+      - name: Test
+        run: dotnet test -c Release --no-build --verbosity normal
+
+  aot-smoke:
+    name: Trimmed-publish AOT smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Trimmed publish (zero trim warnings enforced via TreatWarningsAsErrors)
+        run: >
+          dotnet publish samples/ReperioNet.Sample.Console -c Release -r linux-x64
+          --self-contained -p:PublishTrimmed=true -o trimmed
+      - name: Run trimmed binary
+        run: ./trimmed/ReperioNet.Sample.Console
+
+  pack:
+    name: Pack packages
+    needs: [test, aot-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Pack
+        run: dotnet pack -c Release -o packages -p:ContinuousIntegrationBuild=true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packages/*
+
+  publish:
+    name: Push to NuGet
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Push (nupkg + snupkg)
+        run: >
+          dotnet nuget push "packages/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json --skip-duplicate

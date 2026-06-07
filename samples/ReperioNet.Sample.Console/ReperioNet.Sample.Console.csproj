@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ReperioNet.Sample.ConsoleApp</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The trimmed publish of this sample is the AOT/trimming smoke test (PRD §11):
+         dotnet publish -c Release -r RID (self-contained) -p:PublishTrimmed=true
+         must complete with zero trim warnings and the binary must run the demo queries. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ReperioNet\ReperioNet.csproj" />
+    <ProjectReference Include="..\..\src\ReperioNet.Languages.All\ReperioNet.Languages.All.csproj" />
+  </ItemGroup>
+
+</Project>

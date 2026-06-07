@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ReperioNet</RootNamespace>
+    <Description>Embedded, fuzzy, multilingual full-text search for .NET on SQLite FTS5 — typo-tolerant, substring, stemming and phonetic search with no server and no native build steps.</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- AOT/trimming is a hard requirement (PRD §2): enable the trim/AOT/single-file analyzers. -->

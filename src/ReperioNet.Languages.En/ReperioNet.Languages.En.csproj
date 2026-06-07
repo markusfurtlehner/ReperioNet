@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ReperioNet.Languages.En</RootNamespace>
+    <Description>English (en) language pack for ReperioNet: vendored Snowball (Porter2) stemmer, Double Metaphone and stop words.</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsAotCompatible>true</IsAotCompatible>

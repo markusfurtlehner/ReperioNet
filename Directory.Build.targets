@@ -1,0 +1,9 @@
+<Project>
+
+  <!-- Every shipped package carries the repository README (PRD §12). Evaluated here (after the
+       project file) so IsPackable set by test/sample projects is respected. -->
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>
