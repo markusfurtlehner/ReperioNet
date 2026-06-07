@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using ReperioNet;
 using ReperioNet.Benchmark;
 using ReperioNet.Languages.All;
@@ -52,6 +53,7 @@ Console.WriteLine();
 
 var total = Stopwatch.StartNew();
 var failures = 0;
+var contentBytes = 0L;
 
 await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
 {
@@ -70,7 +72,11 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
         {
             var count = Math.Min(batch, docs - start);
             var batchTimer = Stopwatch.StartNew();
-            await index.AddRangeAsync(EmailCorpus.Range(start, count));
+            await index.AddRangeAsync(EmailCorpus.Range(start, count).Select(entry =>
+            {
+                contentBytes += Encoding.UTF8.GetByteCount(entry.Content);
+                return entry;
+            }));
             var done = start + count;
             var eta = TimeSpan.FromSeconds(indexing.Elapsed.TotalSeconds / done * (docs - done));
             Console.WriteLine(
@@ -236,7 +242,22 @@ await using (var index = await SearchIndex<EmailMeta>.OpenAsync(dbPath, o =>
 
 var dbBytes = new[] { "", "-wal", "-shm" }.Sum(s => File.Exists(dbPath + s) ? new FileInfo(dbPath + s).Length : 0);
 Console.WriteLine();
-Console.WriteLine($"database size: {dbBytes / 1024.0 / 1024.0 / 1024.0:N2} GiB   total wall time: {total.Elapsed:hh\\:mm\\:ss}");
+if (contentBytes > 0)
+{
+    Console.WriteLine(
+        $"raw content:   {contentBytes,16:N0} bytes ({contentBytes / 1024.0 / 1024.0:N1} MiB, " +
+        $"{contentBytes / (double)docs:N0} bytes/doc avg)");
+    Console.WriteLine(
+        $"database file: {dbBytes,16:N0} bytes ({dbBytes / 1024.0 / 1024.0 / 1024.0:N2} GiB, " +
+        $"{dbBytes / (double)docs:N0} bytes/doc)");
+    Console.WriteLine($"overhead:      db/content ratio {(double)dbBytes / contentBytes:N2}x");
+}
+else
+{
+    Console.WriteLine($"database size: {dbBytes:N0} bytes ({dbBytes / 1024.0 / 1024.0 / 1024.0:N2} GiB)");
+}
+
+Console.WriteLine($"total wall time: {total.Elapsed:hh\\:mm\\:ss}");
 
 if (!keep)
 {
