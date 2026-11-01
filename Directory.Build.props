@@ -2,7 +2,7 @@
 
   <!-- Shared package metadata (PRD §12). Core and language packs are versioned in lockstep. -->
   <PropertyGroup>
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
     <Authors>Markus Furtlehner</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageTags>search;fts5;sqlite;fuzzy;full-text-search;multilingual;embedded;cross-platform</PackageTags>
@@ -10,7 +10,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/markusfurtlehner/ReperioNet</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <!-- Deterministic build + SourceLink (built into the .NET 8 SDK) with snupkg symbols. -->
+    <!-- Deterministic build + SourceLink (built into the .NET SDK) with snupkg symbols. -->
     <Deterministic>true</Deterministic>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>

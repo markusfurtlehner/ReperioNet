@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ReperioNet</RootNamespace>
@@ -13,10 +13,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
-    <!-- Pinned explicitly: the bundle transitively pulled in by Microsoft.Data.Sqlite 8.0.x ships
-         SQLite 3.41.2, below the 3.43.0 minimum required by the PRD (contentless_delete=1). -->
-    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <!-- Pinned explicitly, for two reasons:
+         - The bundle that Microsoft.Data.Sqlite pulls in transitively can ship an SQLite below the
+           3.43.0 minimum the PRD requires (contentless_delete=1).
+         - Bundles up to 2.1.11 carry a vulnerable SQLite (GHSA-2m69-gcr7-jv3q). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.14" />
     <PackageReference Include="FuzzySharp" Version="2.0.2" />
   </ItemGroup>
 

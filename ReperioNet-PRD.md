@@ -26,7 +26,7 @@ This document is the complete, authoritative spec for an implementing agent (e.g
 
 ## 2. Target Framework & Platform Constraints
 
-- **Target framework: `net8.0` only.** netstandard2.0 is explicitly NOT targeted (keeps the AOT/trimming story clean; MAUI mobile targets are net8.0-based). See §14.1.
+- **Target framework: `net10.0` only.** netstandard2.0 is explicitly NOT targeted (keeps the AOT/trimming story clean; MAUI mobile targets are net10.0-based). See §14.1.
 - All code MUST be **pure managed**. The only native artifact is the SQLite engine, supplied transitively via `SQLitePCLRaw.bundle_e_sqlite3` (precompiled for all target platforms incl. iOS/Android).
 - **AOT / trimming safety is a hard requirement** (iOS uses full AOT; MAUI trims aggressively):
   - **No reflection-based discovery / assembly scanning.** Language packs register **explicitly** via extension methods (§7).
@@ -441,7 +441,7 @@ Framework: **xUnit**. Tests MUST cover:
 
 ## 14. Design Decisions (rationale; all fixed)
 
-1. **net8.0 only, no netstandard2.0** — avoids span/JSON-source-gen polyfills and keeps the trimming/AOT path simple; the target consumers (incl. MAUI mobile) are net8.0-based.
+1. **net10.0 only, no netstandard2.0** — avoids span/JSON-source-gen polyfills and keeps the trimming/AOT path simple; the target consumers (incl. MAUI mobile) are net10.0-based. (2.0.0 moved from net8.0 to net10.0: .NET 8 support ends 2026-11-10, and the consumers, ConcilioNet and Atoo Mail, are net10.0-only.)
 2. **`MetadataTypeInfo` required, no reflection JSON fallback** — reflection-based `System.Text.Json` is unsafe under full trimming/iOS AOT. Forcing a source-generated `JsonTypeInfo` guarantees the library is AOT-clean rather than failing at runtime on device.
 3. **Trigram indexes the normalized `base` stream, not raw content** — smaller index and consistent with how queries are normalized (diacritic-folded), so substring matching behaves predictably.
 4. **Stop-word removal OFF by default** — removing stop words can break exact/phrase intent and is risky across mixed-language corpora; index-size cost is acceptable. Opt-in via `RemoveStopWords`, and it only ever strips the `stem`/`phonetic` streams, never `base`.
