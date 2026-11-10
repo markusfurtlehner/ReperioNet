@@ -19,6 +19,8 @@ using ReperioNet.Languages.All;
 //   --skip-index    reuse an existing database (skip generation + indexing)
 //   --keep          keep the database file afterwards
 //   --no-trigram    legacy alias: force the trigram index off
+//   --grouped       run the grouped/ordered query benchmark (PRD 4a) instead (uses --docs, --groups, --iters, --db, --md)
+//   --groups N      number of groups for --grouped (default 30,000)
 //
 // Profiles (PRD §5 layout flags; each yields a different database size):
 //   full        trigram + stemming + phonetic + stored content   (best recall, biggest db)
@@ -35,6 +37,8 @@ string? label = null;
 string? mdBase = null;
 var skipIndex = false;
 var keep = false;
+var grouped = false;
+var groupCount = 30_000;
 var trigramOverride = (bool?)null;
 for (var a = 0; a < args.Length; a++)
 {
@@ -50,8 +54,16 @@ for (var a = 0; a < args.Length; a++)
         case "--skip-index": skipIndex = true; break;
         case "--keep": keep = true; break;
         case "--no-trigram": trigramOverride = false; break;
+        case "--grouped": grouped = true; break;
+        case "--groups": groupCount = int.Parse(args[++a]); break;
         default: Console.Error.WriteLine($"unknown arg {args[a]}"); return 2;
     }
+}
+
+if (grouped)
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+    return await GroupedBenchmark.RunAsync(dbPath, docs, groupCount, iters, batch, label ?? $"{docs:N0} docs", mdBase);
 }
 
 var (trigram, storeContent, phonetic, removeStopWords) = profile switch

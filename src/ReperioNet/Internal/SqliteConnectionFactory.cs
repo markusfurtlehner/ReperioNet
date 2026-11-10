@@ -35,6 +35,8 @@ internal static class SqliteConnectionFactory
     /// <summary>
     /// Applies the per-connection PRAGMAs (PRD §8/§15.1). Must run on every opened connection,
     /// immediately after open, because pooled connections may come back with reset state.
+    /// A 32 MiB page cache and 256 MiB of memory mapping keep the many small index probes of grouped
+    /// queries (PRD §4a) off the page-cache-miss path.
     /// </summary>
     internal static void ApplyPragmas(SqliteConnection connection)
     {
@@ -46,6 +48,8 @@ internal static class SqliteConnectionFactory
             PRAGMA busy_timeout = 5000;
             PRAGMA foreign_keys = ON;
             PRAGMA temp_store   = MEMORY;
+            PRAGMA cache_size   = -32768;
+            PRAGMA mmap_size    = 268435456;
             """;
         command.ExecuteNonQuery();
     }

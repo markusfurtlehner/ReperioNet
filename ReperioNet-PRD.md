@@ -281,7 +281,10 @@ Rules (binding):
 - **Cost.** A group page walks the group field's `(order, row, key)` index from the cursor, keeping a
   pair only if it is its group's newest matching member (one index probe), then counts the 50
   groups it returns. `MembersAsync` is one index range scan. `Count` is O(members of the returned
-  groups), so a few huge groups are the slow case.
+  groups), so a few huge groups are the slow case. Every connection runs with a 32 MiB page cache and 256 MiB
+  of memory mapping: grouped queries are many small index probes and are 3-6x slower on cache misses.
+  Measured at 500k documents / 30k groups: filtered list page of 50 with counts about 15 ms, thread page under 1 ms
+  (`benchmarks/RESULTS.md`).
 - Text search and field filters are separate: `SearchAsync` is unchanged (combining a text query with
   a group listing is out of scope for 2.1).
 

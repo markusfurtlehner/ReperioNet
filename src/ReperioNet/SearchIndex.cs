@@ -26,7 +26,7 @@ namespace ReperioNet;
 /// <para>All I/O methods are asynchronous and accept a <see cref="CancellationToken"/>; SQLite I/O is
 /// synchronous under the hood and runs on a background thread so callers stay off the UI thread.</para>
 /// </remarks>
-public sealed class SearchIndex<TMeta> : IAsyncDisposable
+public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 {
     private const int AnalysisChunkSize = 256;
 
@@ -54,7 +54,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         string? Content,
         string BaseText,
         string Stem,
-        string Phonetic);
+        string Phonetic,
+        EntryFields? Fields);
 
     /// <summary>
     /// Opens (creating if necessary) the search index at <paramref name="databasePath"/>.
@@ -94,6 +95,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
 
                     // 3. Verify the FTS5 module is available.
                     VerifyFts5(connection);
+
+                    options.Fields.Validate();
 
                     // 4. Verify layout flags of an existing index, or create the schema and persist
                     //    schema_version + flags.
@@ -226,23 +229,6 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         return RunReadAsync(connection => SearchCore(connection, query, effectiveOptions), ct);
     }
 
-    /// <summary>
-    /// Lists the groups of a keys field with at least one member matching the query filter, newest
-    /// matching member first, keyset-paged (PRD §4a).
-    /// </summary>
-    /// <exception cref="ArgumentException">Undeclared or wrongly typed field, field without an
-    /// <c>orderBy</c>, bad page size or malformed cursor.</exception>
-    public Task<GroupPage> GroupsAsync(GroupQuery query, CancellationToken ct = default)
-        => throw new NotImplementedException();
-
-    /// <summary>
-    /// Lists the members of one group key matching the query filter, newest first, keyset-paged (PRD §4a).
-    /// </summary>
-    /// <exception cref="ArgumentException">Undeclared or wrongly typed field, field without an
-    /// <c>orderBy</c>, bad page size or malformed cursor.</exception>
-    public Task<MemberPage<TMeta>> MembersAsync(MemberQuery query, CancellationToken ct = default)
-        => throw new NotImplementedException();
-
     /// <summary>Runs FTS <c>optimize</c> on the search tables, then <c>PRAGMA optimize</c> and a WAL checkpoint.</summary>
     /// <param name="ct">Cancellation token.</param>
     public Task OptimizeAsync(CancellationToken ct = default)
@@ -312,7 +298,7 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         var singleEntry = entries is SearchEntry<TMeta>[] { Length: 1 };
         using var tuning = singleEntry ? null : BulkWriteTuning.Apply(_writeConnection);
         using var transaction = _writeConnection.BeginTransaction();
-        using var batch = new UpsertBatch(_writeConnection, transaction, _options.EnableTrigram);
+        using var batch = new UpsertBatch(_writeConnection, transaction, _options.EnableTrigram, _options.Fields);
         var cache = singleEntry ? null : new AnalysisCache(_options.Analyzers);
 
         foreach (var chunk in ReadChunks(entries, ct))
@@ -352,7 +338,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
                     document.Content,
                     document.BaseText,
                     document.Stem,
-                    document.Phonetic);
+                    document.Phonetic,
+                    document.Fields);
             }
         }
 
@@ -363,6 +350,7 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
     private PreparedDocument PrepareDocument(SearchEntry<TMeta> entry, string paramName, AnalysisCache? cache)
     {
         ValidateEntry(entry, paramName);
+        UpsertBatch.Validate(_options.Fields, entry.Fields);
 
         // §6.2: apply MaxContentChars before any processing.
         var text = ApplyMaxContentChars(entry.Content ?? string.Empty);
@@ -383,7 +371,8 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
             _options.StoreContent ? text : null,
             text,
             stem,
-            phonetic);
+            phonetic,
+            entry.Fields);
     }
 
     /// <summary>Buffers the input into analysis chunks, honoring cancellation per entry as before.</summary>
@@ -432,10 +421,14 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
                 ? """
                   DELETE FROM documents_fts WHERE rowid = @rowid;
                   DELETE FROM documents_trgm WHERE rowid = @rowid;
+                  DELETE FROM doc_keys WHERE rowid = @rowid;
+                  DELETE FROM doc_nums WHERE rowid = @rowid;
                   DELETE FROM documents WHERE rowid = @rowid;
                   """
                 : """
                   DELETE FROM documents_fts WHERE rowid = @rowid;
+                  DELETE FROM doc_keys WHERE rowid = @rowid;
+                  DELETE FROM doc_nums WHERE rowid = @rowid;
                   DELETE FROM documents WHERE rowid = @rowid;
                   """;
             delete.Parameters.AddWithValue("@rowid", rowid);
@@ -454,11 +447,15 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         command.CommandText = _options.EnableTrigram
             ? """
               DELETE FROM documents;
+              DELETE FROM doc_keys;
+              DELETE FROM doc_nums;
               DELETE FROM documents_fts;
               DELETE FROM documents_trgm;
               """
             : """
               DELETE FROM documents;
+              DELETE FROM doc_keys;
+              DELETE FROM doc_nums;
               DELETE FROM documents_fts;
               """;
         command.ExecuteNonQuery();

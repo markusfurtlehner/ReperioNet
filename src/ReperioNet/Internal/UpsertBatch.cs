@@ -16,9 +16,36 @@ internal sealed class UpsertBatch : IDisposable
     private readonly SqliteCommand _insertDocument;
     private readonly SqliteCommand _insertFts;
     private readonly SqliteCommand? _insertTrigram;
+    private readonly FieldDeclarations _fields;
+    private readonly SqliteCommand? _deleteKeys;
+    private readonly SqliteCommand? _deleteNums;
+    private readonly SqliteCommand? _insertKey;
+    private readonly SqliteCommand? _insertNum;
 
-    internal UpsertBatch(SqliteConnection connection, SqliteTransaction transaction, bool enableTrigram)
+    internal UpsertBatch(SqliteConnection connection, SqliteTransaction transaction, bool enableTrigram, FieldDeclarations fields)
     {
+        _fields = fields;
+        if (fields.All.Count > 0)
+        {
+            _deleteKeys = Create(connection, transaction, "DELETE FROM doc_keys WHERE rowid = @rowid;", ("@rowid", SqliteType.Integer));
+            _deleteNums = Create(connection, transaction, "DELETE FROM doc_nums WHERE rowid = @rowid;", ("@rowid", SqliteType.Integer));
+            _insertKey = Create(
+                connection,
+                transaction,
+                "INSERT INTO doc_keys (rowid, field, key, ord) VALUES (@rowid, @field, @key, @ord);",
+                ("@rowid", SqliteType.Integer),
+                ("@field", SqliteType.Text),
+                ("@key", SqliteType.Text),
+                ("@ord", SqliteType.Integer));
+            _insertNum = Create(
+                connection,
+                transaction,
+                "INSERT INTO doc_nums (rowid, field, value) VALUES (@rowid, @field, @value);",
+                ("@rowid", SqliteType.Integer),
+                ("@field", SqliteType.Text),
+                ("@value", SqliteType.Integer));
+        }
+
         _selectRowid = Create(
             connection,
             transaction,
@@ -99,7 +126,8 @@ internal sealed class UpsertBatch : IDisposable
         string? content,
         string baseText,
         string stem,
-        string phonetic)
+        string phonetic,
+        EntryFields? entryFields = null)
     {
         // Step 1: find the existing internal rowid (NULL if new).
         _selectRowid.Parameters["@doc_id"].Value = docId;
@@ -136,6 +164,8 @@ internal sealed class UpsertBatch : IDisposable
             rowid = (long)_insertDocument.ExecuteScalar()!;
         }
 
+        WriteFields(rowid, entryFields);
+
         _insertFts.Parameters["@rowid"].Value = rowid;
         _insertFts.Parameters["@base"].Value = baseText;
         _insertFts.Parameters["@stem"].Value = stem;
@@ -150,8 +180,86 @@ internal sealed class UpsertBatch : IDisposable
         }
     }
 
+    /// <summary>Validates <paramref name="fields"/> against the declarations (ArgumentException on mismatch).</summary>
+    internal static void Validate(FieldDeclarations declarations, EntryFields? fields)
+    {
+        if (fields is null)
+        {
+            return;
+        }
+
+        foreach (var (name, value) in fields.Values)
+        {
+            if (!declarations.TryGet(name, out var declared))
+            {
+                throw new ArgumentException($"Field '{name}' is not declared in ReperioOptions.Fields.", nameof(fields));
+            }
+
+            var ok = declared.Kind switch
+            {
+                FieldKind.Keys => value is HashSet<string>,
+                FieldKind.Number => value is long,
+                _ => value is bool,
+            };
+            if (!ok)
+            {
+                throw new ArgumentException($"Field '{name}' is declared as {declared.Kind}; the value has the wrong kind.", nameof(fields));
+            }
+        }
+    }
+
+    private void WriteFields(long rowid, EntryFields? fields)
+    {
+        if (_insertKey is null)
+        {
+            return;
+        }
+
+        _deleteKeys!.Parameters["@rowid"].Value = rowid;
+        _deleteKeys.ExecuteNonQuery();
+        _deleteNums!.Parameters["@rowid"].Value = rowid;
+        _deleteNums.ExecuteNonQuery();
+        if (fields is null)
+        {
+            return;
+        }
+
+        foreach (var (name, value) in fields.Values)
+        {
+            var (kind, orderBy) = _fields.All[name];
+            if (kind == FieldKind.Keys)
+            {
+                var ord = long.MinValue;
+                if (orderBy is not null && fields.Values.TryGetValue(orderBy, out var o) && o is long n)
+                {
+                    ord = n;
+                }
+
+                _insertKey.Parameters["@rowid"].Value = rowid;
+                _insertKey.Parameters["@field"].Value = name;
+                _insertKey.Parameters["@ord"].Value = ord;
+                foreach (var key in (HashSet<string>)value)
+                {
+                    _insertKey.Parameters["@key"].Value = key;
+                    _insertKey.ExecuteNonQuery();
+                }
+            }
+            else
+            {
+                _insertNum!.Parameters["@rowid"].Value = rowid;
+                _insertNum.Parameters["@field"].Value = name;
+                _insertNum.Parameters["@value"].Value = value is bool b ? (b ? 1L : 0L) : (long)value;
+                _insertNum.ExecuteNonQuery();
+            }
+        }
+    }
+
     public void Dispose()
     {
+        _deleteKeys?.Dispose();
+        _deleteNums?.Dispose();
+        _insertKey?.Dispose();
+        _insertNum?.Dispose();
         _selectRowid.Dispose();
         _deleteFts.Dispose();
         _deleteTrigram?.Dispose();

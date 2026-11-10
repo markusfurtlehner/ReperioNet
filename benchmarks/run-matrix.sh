@@ -32,7 +32,7 @@ PROFILES=(full no-trigram compact smallest)
 echo "building..."
 dotnet build "$ROOT/benchmarks/ReperioNet.Benchmark" -c Release >/dev/null
 
-rm -f "$TMP.summary.md" "$TMP.details.md"
+rm -f "$TMP.summary.md" "$TMP.details.md" "$TMP.grouped.md"
 mkdir -p "$(dirname "$TMP")"
 
 run=0
@@ -52,6 +52,12 @@ for device in "${DEVICES[@]}"; do
       | tail -12
   done
 done
+
+# Grouped/ordered queries (PRD 4a) at 100k and 500k documents, full desktop.
+echo
+echo "=== grouped queries ==="
+dotnet "$DLL" --grouped --docs 100000 --groups 6000 --iters 30 --label "desktop / 100k docs, 6000 groups"   --md "$TMP" --db "/tmp/reperionet-bench/grouped.db" | tail -9
+dotnet "$DLL" --grouped --docs 500000 --groups 30000 --iters 30 --label "desktop / 500k docs, 30000 groups"   --md "$TMP" --db "/tmp/reperionet-bench/grouped.db" | tail -9
 
 {
   echo "# ReperioNet benchmark results"
@@ -89,8 +95,16 @@ done
   echo "## Per-run details"
   echo
   cat "$TMP.details.md"
+  echo
+  echo "## Grouped and ordered queries"
+  echo
+  echo "Documents carry one conversation key (20% two), an account, a folder role, a date and an unread"
+  echo "flag; group sizes are skewed (the biggest group holds about 0.6% of all documents). The list"
+  echo "filter is \`account in (a0, a1)\` and \`role not in (junk, trash)\`, with an unread count per group."
+  echo
+  cat "$TMP.grouped.md"
 } > "$OUT"
 
-rm -f "$TMP.summary.md" "$TMP.details.md"
+rm -f "$TMP.summary.md" "$TMP.details.md" "$TMP.grouped.md"
 echo
 echo "report written to $OUT"

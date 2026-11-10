@@ -70,7 +70,7 @@ public class OpenAsyncTests
         Assert.Equal("true", meta["enable_phonetic"]);
         Assert.Equal("false", meta["remove_stop_words"]);
         Assert.Equal("unicode61 remove_diacritics 2", meta["tokenizer"]);
-        Assert.Equal(7, meta.Count);
+        Assert.Equal(8, meta.Count);
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public class OpenAsyncTests
         Assert.NotNull(reopened);
 
         // Reopening must not duplicate or rewrite meta rows.
-        Assert.Equal(7, db.ReadMeta().Count);
+        Assert.Equal(8, db.ReadMeta().Count);
     }
 
     [Fact]

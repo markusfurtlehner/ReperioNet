@@ -367,3 +367,46 @@ all-terms numbers here are a lower bound.
 | short query (prefix aid) | 50 | 274.4 ms | 270.7 ms | 306.2 ms | 306.2 ms |
 | no-match term | 0 | 0.4 ms | 0.1 ms | 0.1 ms | 0.1 ms |
 
+
+## Grouped and ordered queries
+
+Measured for 2.1.0 on a Windows 11 desktop (32 logical cores), .NET 10, with other desktop load running, via
+`dotnet run -c Release --project benchmarks/ReperioNet.Benchmark -- --grouped --docs N --groups G` (the matrix script runs the same two sizes on Linux).
+
+Documents carry one conversation key (20% two), an account, a folder role, a date and an unread flag;
+group sizes are skewed (the biggest group holds about 0.6% of all documents; a filtered page of 50
+groups counts about 1,900 members). The list filter is `account in (a0, a1)` and `role not in (junk, trash)`,
+with an unread count per group. Profile: no trigram, content, phonetic or stemming (isolates the field cost).
+
+### Grouped queries — desktop / 100k docs, 6000 groups
+
+- documents: 100 000 in 6 000 skewed groups (20% in two groups), indexed in 6.5 s (15 270 docs/s), no trigram/content/phonetic/stemming
+- database: 53 MiB
+- incremental write p50: add 0.43 ms, change 0.55 ms, delete 0.25 ms
+
+| pattern | items | p50 | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| list page 1 (50 groups, filter, unread) | 50 | 13.95 ms | 21.71 ms | 29.33 ms |
+| list page 200 (cursor, filter, unread) | 50 | 12.40 ms | 15.82 ms | 21.13 ms |
+| list page 1, no filter, no counts | 50 | 0.48 ms | 0.74 ms | 0.80 ms |
+| thread page 1 (typical group, filter) | 9 | 0.15 ms | 0.26 ms | 0.36 ms |
+| thread page 1 (biggest group, filter) | 50 | 0.34 ms | 0.49 ms | 0.71 ms |
+| thread page after 500 (biggest group) | 50 | 0.37 ms | 0.51 ms | 0.66 ms |
+| list page 1 after updates | 50 | 14.75 ms | 17.63 ms | 24.49 ms |
+
+### Grouped queries — desktop / 500k docs, 30000 groups
+
+- documents: 500 000 in 30 000 skewed groups (20% in two groups), indexed in 29.6 s (16 900 docs/s), no trigram/content/phonetic/stemming
+- database: 267 MiB
+- incremental write p50: add 0.50 ms, change 0.67 ms, delete 0.28 ms
+
+| pattern | items | p50 | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| list page 1 (50 groups, filter, unread) | 50 | 15.81 ms | 17.69 ms | 22.34 ms |
+| list page 200 (cursor, filter, unread) | 50 | 14.57 ms | 17.94 ms | 21.87 ms |
+| list page 1, no filter, no counts | 50 | 0.69 ms | 1.30 ms | 1.58 ms |
+| thread page 1 (typical group, filter) | 9 | 0.18 ms | 0.34 ms | 0.56 ms |
+| thread page 1 (biggest group, filter) | 50 | 0.39 ms | 0.63 ms | 1.05 ms |
+| thread page after 500 (biggest group) | 50 | 0.51 ms | 0.98 ms | 0.99 ms |
+| list page 1 after updates | 50 | 15.27 ms | 19.85 ms | 20.19 ms |
+

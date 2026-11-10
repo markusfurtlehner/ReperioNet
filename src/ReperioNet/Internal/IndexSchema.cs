@@ -6,7 +6,7 @@ namespace ReperioNet.Internal;
 internal static class IndexSchema
 {
     /// <summary>Current schema version written to and required in <c>reperio_meta</c>.</summary>
-    internal const string SchemaVersion = "1";
+    internal const string SchemaVersion = "2";
 
     /// <summary>The fixed tokenizer recorded in <c>reperio_meta</c>.</summary>
     internal const string Tokenizer = "unicode61 remove_diacritics 2";
@@ -18,6 +18,7 @@ internal static class IndexSchema
     internal const string EnablePhoneticKey = "enable_phonetic";
     internal const string RemoveStopWordsKey = "remove_stop_words";
     internal const string TokenizerKey = "tokenizer";
+    internal const string FieldsKey = "fields";
 
     private const string CreateMetaTableSql =
         """
@@ -37,6 +38,25 @@ internal static class IndexSchema
             rank_text TEXT NOT NULL,         -- normalized base token stream (used for fuzzy re-rank)
             content   TEXT                   -- original content; NULL unless StoreContent = true
         );
+        """;
+
+    private const string CreateFieldTablesSql =
+        """
+        CREATE TABLE IF NOT EXISTS doc_keys (
+            rowid INTEGER NOT NULL,   -- documents.rowid
+            field TEXT NOT NULL,
+            key   TEXT NOT NULL,
+            ord   INTEGER NOT NULL,   -- the field's orderBy number (long.MinValue if none)
+            PRIMARY KEY (rowid, field, key)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS doc_keys_member ON doc_keys (field, key, ord DESC, rowid DESC);
+        CREATE INDEX IF NOT EXISTS doc_keys_walk ON doc_keys (field, ord DESC, rowid DESC, key);
+        CREATE TABLE IF NOT EXISTS doc_nums (
+            rowid INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            PRIMARY KEY (rowid, field)
+        ) WITHOUT ROWID;
         """;
 
     private const string CreateFtsTableSql =
@@ -155,8 +175,8 @@ internal static class IndexSchema
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = enableTrigram
-            ? CreateMetaTableSql + CreateDocumentsTableSql + CreateFtsTableSql + CreateTrigramTableSql
-            : CreateMetaTableSql + CreateDocumentsTableSql + CreateFtsTableSql;
+            ? CreateMetaTableSql + CreateDocumentsTableSql + CreateFieldTablesSql + CreateFtsTableSql + CreateTrigramTableSql
+            : CreateMetaTableSql + CreateDocumentsTableSql + CreateFieldTablesSql + CreateFtsTableSql;
         command.ExecuteNonQuery();
     }
 
@@ -188,6 +208,7 @@ internal static class IndexSchema
         yield return (EnablePhoneticKey, FormatBool(options.EnablePhonetic));
         yield return (RemoveStopWordsKey, FormatBool(options.RemoveStopWords));
         yield return (TokenizerKey, Tokenizer);
+        yield return (FieldsKey, options.Fields.Canonical());
     }
 
     private static string FormatBool(bool value) => value ? "true" : "false";

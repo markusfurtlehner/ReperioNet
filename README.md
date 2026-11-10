@@ -103,6 +103,37 @@ and call `RebuildAsync()` after changing flags, or start a new database file.
 - `MaxContentChars` (default 0 = unbounded): caps the indexed text length.
 - `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`.
 
+## Grouped, ordered queries (2.1)
+
+Besides full-text search an index keeps structured fields (multi-valued keys, numbers, flags) so you
+can list **groups ordered by their newest member** with exact counts and stable keyset paging, for
+example the conversations of a mail client, and page through the members of one group:
+
+```csharp
+var index = await SearchIndex<Mail>.OpenAsync("index.db", o =>
+{
+    o.MetadataTypeInfo = AppJsonContext.Default.Mail;
+    o.Fields.Number("date").Flag("unread").Keys("account").Keys("conv", orderBy: "date");
+});
+
+await index.AddAsync(new SearchEntry<Mail>(id, text, meta, Fields: new EntryFields()
+    .Keys("conv", "alice@x.org").Keys("account", "acc1").Number("date", sent).Flag("unread", true)));
+
+var q = new GroupQuery { GroupField = "conv", PageSize = 50, Filter = FieldFilter.KeyIn("account", "acc1") };
+q.CountWhere.Add("unread");
+GroupPage page = await index.GroupsAsync(q);        // Key, NewestId, NewestOrder, Count, FlagCounts
+q.After = page.Next;                                 // opaque cursor, no gaps or duplicates
+
+MemberPage<Mail> thread = await index.MembersAsync(new MemberQuery { GroupField = "conv", GroupKey = "alice@x.org" });
+```
+
+A document may belong to several groups. Filters (`FieldFilter`) combine key, flag and number
+predicates with `And`/`Or`/`Not`. Updates, removals and re-keys keep the grouping exact in the same
+transaction as the document (no rebuilds). The field declaration is a persisted layout flag, and
+2.1 raises the schema version to 2 (an index written by 2.0 must be re-created). See PRD §4a.
+At 500k documents in 30k groups a filtered list page of 50 with counts takes about 15 ms and a
+thread page under 1 ms (`benchmarks/RESULTS.md`).
+
 ## Bulk indexing
 
 `AddRangeAsync` indexes the whole batch in **one transaction** and is heavily optimized for large
