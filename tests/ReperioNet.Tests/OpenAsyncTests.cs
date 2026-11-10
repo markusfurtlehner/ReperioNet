@@ -63,7 +63,7 @@ public class OpenAsyncTests
         }
 
         var meta = db.ReadMeta();
-        Assert.Equal("1", meta["schema_version"]);
+        Assert.Equal("2", meta["schema_version"]);
         Assert.Equal("true", meta["store_content"]);
         Assert.Equal("true", meta["enable_trigram"]);
         Assert.Equal("true", meta["enable_stemming"]);

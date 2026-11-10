@@ -226,6 +226,23 @@ public sealed class SearchIndex<TMeta> : IAsyncDisposable
         return RunReadAsync(connection => SearchCore(connection, query, effectiveOptions), ct);
     }
 
+    /// <summary>
+    /// Lists the groups of a keys field with at least one member matching the query filter, newest
+    /// matching member first, keyset-paged (PRD §4a).
+    /// </summary>
+    /// <exception cref="ArgumentException">Undeclared or wrongly typed field, field without an
+    /// <c>orderBy</c>, bad page size or malformed cursor.</exception>
+    public Task<GroupPage> GroupsAsync(GroupQuery query, CancellationToken ct = default)
+        => throw new NotImplementedException();
+
+    /// <summary>
+    /// Lists the members of one group key matching the query filter, newest first, keyset-paged (PRD §4a).
+    /// </summary>
+    /// <exception cref="ArgumentException">Undeclared or wrongly typed field, field without an
+    /// <c>orderBy</c>, bad page size or malformed cursor.</exception>
+    public Task<MemberPage<TMeta>> MembersAsync(MemberQuery query, CancellationToken ct = default)
+        => throw new NotImplementedException();
+
     /// <summary>Runs FTS <c>optimize</c> on the search tables, then <c>PRAGMA optimize</c> and a WAL checkpoint.</summary>
     /// <param name="ct">Cancellation token.</param>
     public Task OptimizeAsync(CancellationToken ct = default)

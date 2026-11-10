@@ -233,6 +233,58 @@ var hits = await index.SearchAsync("müler rechnng");          // typo-tolerant,
 foreach (var h in hits) Console.WriteLine($"{h.Score:F2}  {h.Metadata.FileName}");
 ```
 
+### 4a. Structured fields, grouped and member queries (2.1)
+
+Beside the full-text tables an index keeps **structured fields** for filtering, grouping and
+ordering: multi-valued keyword fields (`Keys`), single-valued 64-bit numbers (`Number`, e.g. a date
+as UTC ticks) and booleans (`Flag`). They exist so that a consumer can list *groups ordered by their
+newest member* (an email client's conversations) with exact counts and stable paging, without a
+second index.
+
+```csharp
+// Declaration (ReperioOptions<TMeta>.Fields; persisted in reperio_meta, a change is a layout mismatch)
+o.Fields.Number("date").Flag("unread").Keys("account").Keys("conv", orderBy: "date");
+
+// Values per document (SearchEntry.Fields; an upsert replaces all field values, absent = none)
+new SearchEntry<M>(id, text, meta, Fields: new EntryFields()
+    .Keys("conv", "alice@x.org", "bob@x.org").Keys("account", "acc1")
+    .Number("date", DateTimeOffset.UtcNow).Flag("unread", true));
+
+// The list: groups with >= 1 member matching the filter, newest matching member first
+var q = new GroupQuery { GroupField = "conv", PageSize = 50,
+                         Filter = FieldFilter.And(FieldFilter.KeyIn("account", "acc1"), FieldFilter.Flag("unread", true)) };
+q.CountWhere.Add("unread");
+GroupPage page = await index.GroupsAsync(q);          // page.Groups[i]: Key, NewestId, NewestOrder, Count, FlagCounts
+q.After = page.Next;                                   // opaque keyset cursor; null = last page
+
+// The thread: members of one key matching the filter, newest first
+MemberPage<M> thread = await index.MembersAsync(new MemberQuery { GroupField = "conv", GroupKey = "alice@x.org" });
+```
+
+Rules (binding):
+
+- **Order.** Groups: `(newest matching member's order number DESC, that member's internal row DESC,
+  group key ASC)`; the newest member of a group is the matching member with the greatest
+  `(order DESC, row DESC)`. Members: `(order DESC, row DESC)`. A document without the order number
+  sorts last (`long.MinValue`). The order is total, so a page boundary is exact.
+- **Filters** (`FieldFilter`): `KeyEquals`, `KeyIn`, `KeyNotIn` (true for a document without keys),
+  `Flag` (absent = false), `NumberAtLeast/AtMost/Between` (inclusive; absent never matches), and
+  `And`/`Or`/`Not`. A filter on an undeclared field or of the wrong kind throws `ArgumentException`.
+  A document is a member of a group only if it matches the filter; a group with no matching member
+  is not listed, and `Count`/`FlagCounts` count matching members only.
+- **Cursors** are opaque strings carrying the position `(order, row, key)`, not an offset. Under
+  concurrent updates a group that is present and unchanged is never skipped or repeated; a group
+  whose newest member changed appears at its new position (possibly on a page already read).
+  A malformed cursor throws `ArgumentException`. `PageSize` is 1..1000.
+- **Incremental maintenance.** Field rows are rewritten in the same transaction as the document's
+  upsert/remove/clear: O(log n) per row. A re-key is a remove plus an add. Nothing is rebuilt.
+- **Cost.** A group page walks the group field's `(order, row, key)` index from the cursor, keeping a
+  pair only if it is its group's newest matching member (one index probe), then counts the 50
+  groups it returns. `MembersAsync` is one index range scan. `Count` is O(members of the returned
+  groups), so a few huge groups are the slow case.
+- Text search and field filters are separate: `SearchAsync` is unchanged (combining a text query with
+  a group listing is out of scope for 2.1).
+
 ---
 
 ## 5. Data Model (SQLite schema)
@@ -270,9 +322,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS documents_trgm USING fts5(
 );
 ```
 
+Structured fields (§4a, schema version `"2"`, created in every profile, empty when nothing is declared):
+
+```sql
+CREATE TABLE IF NOT EXISTS doc_keys (   -- multi-valued keyword fields
+    rowid INTEGER NOT NULL,             -- documents.rowid
+    field TEXT NOT NULL,
+    key   TEXT NOT NULL,
+    ord   INTEGER NOT NULL,             -- the field's orderBy number for this document (long.MinValue if none)
+    PRIMARY KEY (rowid, field, key)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS doc_keys_member ON doc_keys (field, key, ord DESC, rowid DESC);
+CREATE INDEX IF NOT EXISTS doc_keys_walk   ON doc_keys (field, ord DESC, rowid DESC, key);
+
+CREATE TABLE IF NOT EXISTS doc_nums (   -- numbers and flags (0/1)
+    rowid INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (rowid, field)
+) WITHOUT ROWID;
+```
+
+`reperio_meta` additionally persists `fields` (the canonical declaration). `schema_version` is `"2"`.
+
 `documents_fts.rowid` and `documents_trgm.rowid` MUST equal `documents.rowid` for the same document.
 
-`reperio_meta` MUST persist: `schema_version` (start at `"1"`), and the layout-affecting flags `store_content`, `enable_trigram`, `enable_stemming`, `enable_phonetic`, `remove_stop_words`, `tokenizer` (the fixed `unicode61 remove_diacritics 2`). On reopen, if any persisted layout flag differs from the requested options, `OpenAsync` MUST throw `ReperioException` naming the mismatched flag and instructing the caller to call `RebuildAsync()` or open with matching options. No silent rebuild. See §14.7.
+`reperio_meta` MUST persist: `schema_version` (`"1"` until 2.0, `"2"` from 2.1), and the layout-affecting flags `store_content`, `enable_trigram`, `enable_stemming`, `enable_phonetic`, `remove_stop_words`, `tokenizer` (the fixed `unicode61 remove_diacritics 2`). On reopen, if any persisted layout flag differs from the requested options, `OpenAsync` MUST throw `ReperioException` naming the mismatched flag and instructing the caller to call `RebuildAsync()` or open with matching options. No silent rebuild. See §14.7.
 
 ---
 

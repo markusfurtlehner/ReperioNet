@@ -6,8 +6,10 @@ namespace ReperioNet;
 /// <param name="Content">The text to index (may be empty).</param>
 /// <param name="Metadata">The metadata payload returned with hits.</param>
 /// <param name="Language">Optional explicit ISO 639-1 language code; <see langword="null"/> defers to the detector or default language.</param>
+/// <param name="Fields">Optional structured field values for filtering, grouping and ordering (PRD §4a); <see langword="null"/> means none.</param>
 public sealed record SearchEntry<TMeta>(
     string Id,
     string Content,
     TMeta Metadata,
-    string? Language = null);
+    string? Language = null,
+    EntryFields? Fields = null);

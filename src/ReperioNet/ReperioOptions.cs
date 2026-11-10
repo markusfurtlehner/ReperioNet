@@ -48,6 +48,9 @@ public sealed class ReperioOptions<TMeta>
     /// <summary>Truncates indexed text to this many characters; 0 = unbounded. Default: 0.</summary>
     public int MaxContentChars { get; set; }
 
+    /// <summary>The structured fields (keys, numbers, flags) maintained for filtering, grouping and ordering (PRD §4a).</summary>
+    public FieldDeclarations Fields { get; } = new();
+
     /// <summary>
     /// REQUIRED: source-generated <see cref="JsonTypeInfo{TMeta}"/> used to serialize metadata
     /// (AOT/trimming-safe; no reflection fallback exists). <see cref="SearchIndex{TMeta}.OpenAsync"/>
