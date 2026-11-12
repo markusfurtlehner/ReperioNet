@@ -2,8 +2,9 @@ namespace ReperioNet;
 
 /// <summary>
 /// Thrown for ReperioNet-specific failures: a missing FTS5 module, an SQLite engine older than 3.43.0,
-/// a corrupt or incompatible schema, a layout-flag mismatch on reopen, or a missing
-/// <c>ReperioOptions&lt;TMeta&gt;.MetadataTypeInfo</c>.
+/// a corrupt or incompatible schema, a layout-flag mismatch on reopen, a missing
+/// <c>ReperioOptions&lt;TMeta&gt;.MetadataTypeInfo</c>, an encryption key on a SQLite build that cannot encrypt,
+/// or an index file the given encryption key does not open.
 /// </summary>
 public class ReperioException : Exception
 {

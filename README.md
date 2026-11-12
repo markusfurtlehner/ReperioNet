@@ -101,6 +101,7 @@ and call `RebuildAsync()` after changing flags, or start a new database file.
 - `EnableTrigram` / `EnableStemming` / `EnablePhonetic` (default on): layout-affecting flags, persisted in the index; reopening with different values throws — call `RebuildAsync()` to migrate.
 - `RemoveStopWords` (default off): strips stop words from the stem/phonetic streams only, never from base.
 - `MaxContentChars` (default 0 = unbounded): caps the indexed text length.
+- `EncryptionKey` (default none, 2.2): a 32-byte key that encrypts the index file and its WAL (see *Encryption at rest* below).
 - `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`.
 
 ## Grouped, ordered queries (2.1)
@@ -178,6 +179,27 @@ affinity (`taskset`): desktop (all cores), fast phone (4 cores), slow phone (2 c
 models reduced parallelism, not slower silicon or flash storage. Results, including the exact CPU,
 memory consumption and db/content ratios for every combination, are checked in at
 [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+
+## Encryption at rest (2.2)
+
+Set `o.EncryptionKey` to 32 random bytes to keep the index encrypted on disk (ChaCha20-Poly1305, the default cipher of
+[SQLite3 Multiple Ciphers](https://github.com/utelle/SQLite3MultipleCiphers), MIT). The process must run on that SQLite build:
+reference `SQLite3MC.PCLRaw.bundle` and exclude the stock engine (one SQLite build per process):
+
+```xml
+<PackageReference Include="SQLite3MC.PCLRaw.bundle" Version="2.6.1" />
+<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.14" ExcludeAssets="all" PrivateAssets="all" />
+<PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" ExcludeAssets="all" PrivateAssets="all" />
+<PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" Version="2.1.14" ExcludeAssets="all" PrivateAssets="all" />
+```
+
+- On any other SQLite build `OpenAsync` throws `ReperioException` **before anything is written**: a build without encryption would
+  ignore the key and keep the index in plaintext.
+- Give the same key on every open. A wrong key throws `ReperioException` (for a search index the usual answer is to delete the
+  file and rebuild). A key that is not exactly 32 bytes throws `ArgumentException`.
+- Keeping the key (an OS keystore, a key file) is the caller's job. Microsoft.Data.Sqlite applies it as `PRAGMA key` on every
+  physical connection, so it lives in the connection string in memory as hex for the lifetime of the index.
+- Without a key nothing changes: the index is a plain SQLite file on either build.
 
 ## Operational notes
 

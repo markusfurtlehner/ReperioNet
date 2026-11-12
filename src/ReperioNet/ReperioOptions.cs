@@ -48,6 +48,16 @@ public sealed class ReperioOptions<TMeta>
     /// <summary>Truncates indexed text to this many characters; 0 = unbounded. Default: 0.</summary>
     public int MaxContentChars { get; set; }
 
+    /// <summary>
+    /// Optional 32-byte key that encrypts the index file and its write-ahead log with the default cipher of
+    /// SQLite3 Multiple Ciphers (ChaCha20-Poly1305). It needs the process to run on that SQLite build
+    /// (package <c>SQLite3MC.PCLRaw.bundle</c> instead of <c>SQLitePCLRaw.bundle_e_sqlite3</c>); on any other build
+    /// <see cref="SearchIndex{TMeta}.OpenAsync"/> throws <see cref="ReperioException"/> before anything is written.
+    /// The same key must be given on every open: a wrong key throws <see cref="ReperioException"/>. A key that is not
+    /// exactly 32 bytes throws <see cref="ArgumentException"/>. Default: <see langword="null"/> (no encryption).
+    /// </summary>
+    public byte[]? EncryptionKey { get; set; }
+
     /// <summary>The structured fields (keys, numbers, flags) maintained for filtering, grouping and ordering (PRD §4a).</summary>
     public FieldDeclarations Fields { get; } = new();
 

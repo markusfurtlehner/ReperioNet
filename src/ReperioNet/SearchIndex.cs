@@ -78,14 +78,19 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
         var options = new ReperioOptions<TMeta>();
         configure?.Invoke(options);
+        if (options.EncryptionKey is { Length: not 32 })
+        {
+            throw new ArgumentException(
+                "ReperioOptions<TMeta>.EncryptionKey must be exactly 32 bytes.", nameof(configure));
+        }
 
         return Task.Run(
             () =>
             {
                 // PRD §15.2 startup order (binding):
                 // 1. Open write connection, apply PRAGMAs.
-                var connectionString = SqliteConnectionFactory.BuildConnectionString(databasePath);
-                var connection = SqliteConnectionFactory.Open(connectionString);
+                var connectionString = SqliteConnectionFactory.BuildConnectionString(databasePath, options.EncryptionKey);
+                var connection = SqliteConnectionFactory.Open(connectionString, encrypted: options.EncryptionKey is not null);
                 try
                 {
                     ct.ThrowIfCancellationRequested();

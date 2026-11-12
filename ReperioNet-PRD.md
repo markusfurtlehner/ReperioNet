@@ -137,6 +137,7 @@ public sealed class ReperioOptions<TMeta>
     public bool EnablePhonetic { get; set; } = true;
     public bool RemoveStopWords { get; set; } = false;     // off by default (see §14.4)
     public int  MaxContentChars { get; set; } = 0;         // 0 = unbounded; else truncate indexed text
+    public byte[]? EncryptionKey { get; set; }             // 2.2: 32 bytes; encrypts file + WAL (SQLite3 Multiple Ciphers), see §15.1
 
     public required JsonTypeInfo<TMeta> MetadataTypeInfo { get; set; }  // REQUIRED (AOT-safe), see §2/§14.2
 }
@@ -461,7 +462,8 @@ public static class AllLanguagesExtensions
 
 ## 10. Edge Cases & Error Handling
 
-- `ReperioException` (custom) is thrown for: missing FTS5 module; SQLite < 3.43.0; corrupt/incompatible schema; layout-flag mismatch on reopen; null `MetadataTypeInfo`.
+- `ReperioException` (custom) is thrown for: missing FTS5 module; SQLite < 3.43.0; corrupt/incompatible schema; layout-flag mismatch on reopen; null `MetadataTypeInfo`; an `EncryptionKey` on a SQLite build that cannot encrypt (before anything is written); a file the given key does not open.
+- `ArgumentException` for an `EncryptionKey` that is not exactly 32 bytes.
 - `ArgumentException` for empty `Id`.
 - Empty/whitespace query → empty result (no throw).
 - Query length 1–2 → trigram skipped; prefix aid applied (§9.5).
@@ -542,6 +544,7 @@ These notes are **binding** and **refine §5, §6 and §9 for Milestones 1–2**
   - `Mode = SqliteOpenMode.ReadWriteCreate`
   - `Cache = SqliteCacheMode.Default` (private cache; do **not** use shared cache)
   - `Pooling = true`
+  - with `EncryptionKey` (2.2): `Password = "raw:" + 64 lower-case hex digits`. Microsoft.Data.Sqlite applies it as `PRAGMA key` on every physical connection, so pooled read connections get it too. Requires SQLite3 Multiple Ciphers (`SQLite3MC.PCLRaw.bundle`); its default cipher (ChaCha20-Poly1305) encrypts the database file and the WAL.
 - Open **one dedicated write connection** in `OpenAsync`; keep it for the lifetime of the `SearchIndex`. All writes run on it under the `SemaphoreSlim(1,1)`.
 - Each `SearchAsync`/`ContainsAsync`/`CountAsync` opens a **new** `SqliteConnection` (pooling reuses it), runs, and disposes.
 - **Apply the per-connection PRAGMAs on every opened connection** (write and each read), immediately after `Open()`, because pooled connections may come back with reset state:
@@ -554,7 +557,7 @@ These notes are **binding** and **refine §5, §6 and §9 for Milestones 1–2**
   ```
 
 ### 15.2 `OpenAsync` startup order (binding)
-1. Open write connection, apply PRAGMAs.
+1. Open write connection, apply PRAGMAs. With `EncryptionKey`: before the PRAGMAs (the first of them writes), require `SELECT sqlite3mc_version();` to succeed, else throw `ReperioException`; map SQLite result 26 (not a database) during open to `ReperioException` (wrong key).
 2. Verify version: parse `SELECT sqlite_version();`; throw `ReperioException` if `< 3.43.0`.
 3. Verify FTS5: in try/catch run `CREATE VIRTUAL TABLE temp.__fts5check USING fts5(x); DROP TABLE temp.__fts5check;`; throw `ReperioException` if it fails.
 4. If `reperio_meta` exists: read layout flags; throw `ReperioException` on mismatch (§5). Else create schema (respecting `EnableTrigram`) and write `schema_version="1"` + flags.
