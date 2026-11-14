@@ -292,6 +292,9 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
     /// <summary>From this many candidates the scoring against their texts runs in parallel.</summary>
     private const int ParallelScoreFrom = 64;
 
+    /// <summary>From this many unscored candidates their ids are read on a second connection beside the scoring.</summary>
+    private const int ParallelTailFrom = 1024;
+
     /// <summary>Runs FTS <c>optimize</c> on the search tables, then <c>PRAGMA optimize</c> and a WAL checkpoint.</summary>
     /// <param name="ct">Cancellation token.</param>
     public Task OptimizeAsync(CancellationToken ct = default)
@@ -783,12 +786,37 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // with its bm25 share as the score, but its text is never loaded, folded or fuzzy-scored: that work grows with the pool and
         // with the size of the stored texts, and a caller that only needs to know which documents match does not want to pay it.
         var scoreCount = options.ScorePoolSize is { } scorePool ? Math.Clamp(scorePool, 0, pool.Count) : pool.Count;
-        var documents = LoadDocuments(connection, pool.Take(scoreCount).Select(candidate => candidate.Rowid));
-        var tailDocuments = scoreCount >= pool.Count
-            ? null
-            : keysOnly
-                ? LoadDocumentIds(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid))
-                : LoadDocumentKeys(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid));
+
+        // A long tail is read on a connection of its own while the best candidates are loaded and scored (2.5.1).
+        var tailRowids = scoreCount >= pool.Count ? null : pool.Skip(scoreCount).Select(candidate => candidate.Rowid).ToList();
+        Dictionary<long, (string DocId, string? MetadataJson)> LoadTail(SqliteConnection from) =>
+            keysOnly ? LoadDocumentIds(from, tailRowids!) : LoadDocumentKeys(from, tailRowids!);
+        Task<Dictionary<long, (string DocId, string? MetadataJson)>>? tailLoad = null;
+        if (tailRowids is { Count: >= ParallelTailFrom })
+        {
+            tailLoad = Task.Run(() =>
+            {
+                using var second = SqliteConnectionFactory.Open(_connectionString);
+                return LoadTail(second);
+            });
+        }
+
+        Dictionary<long, (string DocId, string MetadataJson, string RankText, string? Content)> documents;
+        try
+        {
+            documents = LoadDocuments(connection, pool.Take(scoreCount).Select(candidate => candidate.Rowid));
+        }
+        catch
+        {
+            // The tail read must not outlive a failed search unobserved.
+            if (tailLoad is not null)
+            {
+                try { tailLoad.GetAwaiter().GetResult(); }
+                catch { }
+            }
+
+            throw;
+        }
 
         // §9.9: normalize bm25 across the pool (lower is better; best maps to 1.0).
         var min = pool[0].Rank;
@@ -844,6 +872,10 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             }
         }
 
+        var tailDocuments = tailRowids is null
+            ? null
+            : tailLoad is null ? LoadTail(connection) : tailLoad.GetAwaiter().GetResult();
+
         var scored = new List<(int Tier, double Score, string DocId, string? MetadataJson, string? Content)>(pool.Count);
         for (var i = 0; i < pool.Count; i++)
         {
@@ -884,17 +916,39 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             .ThenByDescending(candidate => candidate.Score)
             .ThenBy(candidate => candidate.DocId, StringComparer.Ordinal)
             .Skip(Math.Max(0, options.Offset))
-            .Take(Math.Max(0, options.Limit));
+            .Take(Math.Max(0, options.Limit))
+            .ToList();
 
-        // §9.13: snippets are built only for the page.
+        // §9.13: snippets are built only for the page; each reads only its own text, so a long page builds them on every core (2.5.1).
         var includeSnippet = options.IncludeSnippet && _options.StoreContent;
-        var hits = new List<RawHit>();
-        foreach (var (_, score, docId, metadataJson, content) in page)
+        var snippets = new string?[page.Count];
+        if (includeSnippet)
         {
-            var snippet = includeSnippet && content is not null
-                ? SnippetBuilder.Build(content, tokens, options.Snippet)
-                : null;
-            hits.Add(new RawHit(docId, metadataJson, score, snippet));
+            void Snip(int i)
+            {
+                if (page[i].Content is { } content)
+                {
+                    snippets[i] = SnippetBuilder.Build(content, tokens, options.Snippet);
+                }
+            }
+
+            if (page.Count >= ParallelScoreFrom)
+            {
+                Parallel.For(0, page.Count, Snip);
+            }
+            else
+            {
+                for (var i = 0; i < page.Count; i++)
+                {
+                    Snip(i);
+                }
+            }
+        }
+
+        var hits = new List<RawHit>(page.Count);
+        for (var i = 0; i < page.Count; i++)
+        {
+            hits.Add(new RawHit(page[i].DocId, page[i].MetadataJson, page[i].Score, snippets[i]));
         }
 
         return hits;
