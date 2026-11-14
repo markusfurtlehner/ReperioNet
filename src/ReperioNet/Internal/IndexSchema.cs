@@ -40,6 +40,16 @@ internal static class IndexSchema
         );
         """;
 
+    /// <summary>
+    /// A slim index from a document's rowid to its id (2.4). A search that only needs to know which documents matched reads the
+    /// ids from it and never touches the rows of <c>documents</c>, which hold the stored texts. SQLite maintains it; an index
+    /// created by an earlier version gets it at its next open.
+    /// </summary>
+    internal const string CreateDocumentKeyIndexSql =
+        """
+        CREATE INDEX IF NOT EXISTS documents_key ON documents (rowid, doc_id);
+        """;
+
     private const string CreateFieldTablesSql =
         """
         CREATE TABLE IF NOT EXISTS doc_keys (
@@ -97,6 +107,9 @@ internal static class IndexSchema
             var stored = ReadMeta(connection);
             VerifySchemaVersion(stored);
             VerifyLayoutFlags(stored, options);
+            using var command = connection.CreateCommand();
+            command.CommandText = CreateDocumentKeyIndexSql;
+            command.ExecuteNonQuery();
         }
         else
         {
@@ -175,8 +188,8 @@ internal static class IndexSchema
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = enableTrigram
-            ? CreateMetaTableSql + CreateDocumentsTableSql + CreateFieldTablesSql + CreateFtsTableSql + CreateTrigramTableSql
-            : CreateMetaTableSql + CreateDocumentsTableSql + CreateFieldTablesSql + CreateFtsTableSql;
+            ? CreateMetaTableSql + CreateDocumentsTableSql + CreateDocumentKeyIndexSql + CreateFieldTablesSql + CreateFtsTableSql + CreateTrigramTableSql
+            : CreateMetaTableSql + CreateDocumentsTableSql + CreateDocumentKeyIndexSql + CreateFieldTablesSql + CreateFtsTableSql;
         command.ExecuteNonQuery();
     }
 

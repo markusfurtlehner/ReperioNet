@@ -103,6 +103,7 @@ and call `RebuildAsync()` after changing flags, or start a new database file.
 - `MaxContentChars` (default 0 = unbounded): caps the indexed text length.
 - `EncryptionKey` (default none, 2.2): a 32-byte key that encrypts the index file and its WAL (see *Encryption at rest* below).
 - `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`, `ScorePoolSize` (score only the best N candidates against their stored text; the rest of the pool is returned behind them with its bm25 share as the score and no snippet, and its text is never loaded: for large pools over long texts).
+- `SearchMatchesAsync(query, options)` (2.4): the same matches as `SearchAsync` as `SearchMatch(Id, Score, Snippet)`, without metadata. With `ScorePoolSize` set, the ids of the unscored candidates come from a slim rowid-to-id index (`documents_key`, added to an existing index at its next open), so a query with tens of thousands of matches does not read their stored rows.
 
 ## Grouped, ordered queries (2.1)
 

@@ -231,8 +231,63 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         var effectiveOptions = options ?? new SearchQueryOptions();
-        return RunReadAsync(connection => SearchCore(connection, query, effectiveOptions), ct);
+        return RunReadAsync(connection => Project(SearchCore(connection, query, effectiveOptions, keysOnly: false)), ct);
     }
+
+    /// <summary>
+    /// Searches the index like <see cref="SearchAsync"/> and returns the matches without their metadata (2.4): id, score and
+    /// snippet. With <see cref="SearchQueryOptions.ScorePoolSize"/> set, the candidates that are not scored are read from a slim
+    /// rowid-to-id index only, so a query with tens of thousands of matches does not touch their stored rows.
+    /// </summary>
+    /// <param name="query">The user query; null/whitespace yields an empty result.</param>
+    /// <param name="options">Per-query options; <see langword="null"/> uses defaults.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Matches in the order <see cref="SearchAsync"/> returns its hits.</returns>
+    public Task<IReadOnlyList<SearchMatch>> SearchMatchesAsync(
+        string query,
+        SearchQueryOptions? options = null,
+        CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return Task.FromResult<IReadOnlyList<SearchMatch>>(Array.Empty<SearchMatch>());
+        }
+
+        var effectiveOptions = options ?? new SearchQueryOptions();
+        return RunReadAsync<IReadOnlyList<SearchMatch>>(connection =>
+        {
+            var raw = SearchCore(connection, query, effectiveOptions, keysOnly: true);
+            var matches = new SearchMatch[raw.Count];
+            for (var i = 0; i < raw.Count; i++)
+            {
+                matches[i] = new SearchMatch(raw[i].DocId, raw[i].Score, raw[i].Snippet);
+            }
+
+            return matches;
+        }, ct);
+    }
+
+    /// <summary>§9.13: metadata is deserialized only for the returned page.</summary>
+    private IReadOnlyList<SearchHit<TMeta>> Project(List<RawHit> raw)
+    {
+        if (raw.Count == 0)
+        {
+            return EmptyHits;
+        }
+
+        var hits = new List<SearchHit<TMeta>>(raw.Count);
+        foreach (var hit in raw)
+        {
+            hits.Add(new SearchHit<TMeta>(hit.DocId, JsonSerializer.Deserialize(hit.MetadataJson!, _options.MetadataTypeInfo)!, hit.Score, hit.Snippet));
+        }
+
+        return hits;
+    }
+
+    private readonly record struct RawHit(string DocId, string? MetadataJson, double Score, string? Snippet);
+
+    private static readonly List<RawHit> NoRawHits = new();
 
     /// <summary>Runs FTS <c>optimize</c> on the search tables, then <c>PRAGMA optimize</c> and a WAL checkpoint.</summary>
     /// <param name="ct">Cancellation token.</param>
@@ -569,7 +624,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
     // ---- Read pipeline -------------------------------------------------------------------------
 
     /// <summary>Candidate-pool search: base MATCH + trigram recall, merged by rowid (PRD §9.5–9.9).</summary>
-    private IReadOnlyList<SearchHit<TMeta>> SearchCore(SqliteConnection connection, string query, SearchQueryOptions options)
+    private List<RawHit> SearchCore(SqliteConnection connection, string query, SearchQueryOptions options, bool keysOnly)
     {
         // §9.3: tokenize the query (base terms only until M5 adds stem/phonetic).
         var tokens = Tokenizer.Tokenize(query);
@@ -578,7 +633,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         var useTrigram = _options.EnableTrigram && query.Length >= 3;
         if (tokens.Count == 0 && !useTrigram)
         {
-            return EmptyHits;
+            return NoRawHits;
         }
 
         // §9.7: gather candidates; merge by rowid keeping the best (lowest) bm25 seen for that
@@ -652,7 +707,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
         if (primary.Count == 0 && secondary.Count == 0)
         {
-            return EmptyHits;
+            return NoRawHits;
         }
 
         // Keep the top CandidatePoolSize rowids ordered by tier, then bm25 (lowest first; §9.7).
@@ -669,7 +724,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
         if (pool.Count == 0)
         {
-            return EmptyHits;
+            return NoRawHits;
         }
 
         // §9.8: load metadata, rank_text and content (if stored) for the candidates that are scored against their text: the whole
@@ -678,9 +733,11 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // with the size of the stored texts, and a caller that only needs to know which documents match does not want to pay it.
         var scoreCount = options.ScorePoolSize is { } scorePool ? Math.Clamp(scorePool, 0, pool.Count) : pool.Count;
         var documents = LoadDocuments(connection, pool.Take(scoreCount).Select(candidate => candidate.Rowid));
-        var tailDocuments = scoreCount < pool.Count
-            ? LoadDocumentKeys(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid))
-            : null;
+        var tailDocuments = scoreCount >= pool.Count
+            ? null
+            : keysOnly
+                ? LoadDocumentIds(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid))
+                : LoadDocumentKeys(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid));
 
         // §9.9: normalize bm25 across the pool (lower is better; best maps to 1.0).
         var min = pool[0].Rank;
@@ -692,7 +749,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         var foldedQuery = TextFold.Fold(query);
-        var scored = new List<(int Tier, double Score, string DocId, string MetadataJson, string? Content)>(pool.Count);
+        var scored = new List<(int Tier, double Score, string DocId, string? MetadataJson, string? Content)>(pool.Count);
         for (var i = 0; i < pool.Count; i++)
         {
             var (rowid, rank, tier) = pool[i];
@@ -747,25 +804,56 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             .Skip(Math.Max(0, options.Offset))
             .Take(Math.Max(0, options.Limit));
 
-        // §9.13: project to SearchHit; metadata is deserialized (and snippets built) only for the page.
+        // §9.13: snippets are built only for the page.
         var includeSnippet = options.IncludeSnippet && _options.StoreContent;
-        var hits = new List<SearchHit<TMeta>>();
+        var hits = new List<RawHit>();
         foreach (var (_, score, docId, metadataJson, content) in page)
         {
-            var metadata = JsonSerializer.Deserialize(metadataJson, _options.MetadataTypeInfo)!;
             var snippet = includeSnippet && content is not null
                 ? SnippetBuilder.Build(content, tokens, options.Snippet)
                 : null;
-            hits.Add(new SearchHit<TMeta>(docId, metadata, score, snippet));
+            hits.Add(new RawHit(docId, metadataJson, score, snippet));
         }
 
         return hits;
     }
 
-    /// <summary>Loads only <c>doc_id</c> and metadata JSON for candidate rowids that are not scored against their text.</summary>
-    private static Dictionary<long, (string DocId, string MetadataJson)> LoadDocumentKeys(SqliteConnection connection, IEnumerable<long> rowids)
+    /// <summary>
+    /// Loads only <c>doc_id</c> for candidate rowids, from the slim <c>documents_key</c> index in one statement (the rowids travel
+    /// as one JSON array): the rows of <c>documents</c>, which hold the stored texts, are not read.
+    /// </summary>
+    private static Dictionary<long, (string DocId, string? MetadataJson)> LoadDocumentIds(SqliteConnection connection, IEnumerable<long> rowids)
     {
-        var documents = new Dictionary<long, (string, string)>();
+        var json = new System.Text.StringBuilder("[");
+        foreach (var rowid in rowids)
+        {
+            if (json.Length > 1)
+            {
+                json.Append(',');
+            }
+
+            json.Append(rowid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        json.Append(']');
+        var documents = new Dictionary<long, (string, string?)>();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT d.rowid, d.doc_id FROM json_each(@rowids) j CROSS JOIN documents d INDEXED BY documents_key ON d.rowid = j.value;";
+        command.Parameters.AddWithValue("@rowids", json.ToString());
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            documents[reader.GetInt64(0)] = (reader.GetString(1), null);
+        }
+
+        return documents;
+    }
+
+    /// <summary>Loads only <c>doc_id</c> and metadata JSON for candidate rowids that are not scored against their text.</summary>
+    private static Dictionary<long, (string DocId, string? MetadataJson)> LoadDocumentKeys(SqliteConnection connection, IEnumerable<long> rowids)
+    {
+        var documents = new Dictionary<long, (string, string?)>();
         foreach (var chunk in rowids.Chunk(500))
         {
             using var command = connection.CreateCommand();
