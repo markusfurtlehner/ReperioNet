@@ -34,6 +34,68 @@ internal static class TextFold
     /// </summary>
     private static readonly string?[] LatinFolds = new string?[0x250];
 
+    /// <summary>
+    /// Folds <paramref name="text"/> into buffers from the shared pool (2.6.2): per folded char the start of the original rune it
+    /// came from. Scoring a result page folded every stored text into a new string and two lists of the length of the text, which
+    /// for long mail texts was tens of megabytes per query and showed as garbage collections. Dispose it to hand the buffers back.
+    /// </summary>
+    internal static FoldedText FoldPooled(string text)
+    {
+        var chars = System.Buffers.ArrayPool<char>.Shared.Rent(text.Length + 16);
+        var starts = System.Buffers.ArrayPool<int>.Shared.Rent(text.Length + 16);
+        var count = 0;
+        var position = 0;
+        foreach (var rune in text.EnumerateRunes())
+        {
+            var length = rune.Utf16SequenceLength;
+            if (rune.Value < FirstDecomposable)
+            {
+                if (count == chars.Length)
+                {
+                    Grow(ref chars, count);
+                    Grow(ref starts, count);
+                }
+
+                chars[count] = char.ToLowerInvariant((char)rune.Value);
+                starts[count++] = position;
+                position += length;
+                continue;
+            }
+
+            var decomposed = rune.Value < LatinFolds.Length
+                ? LatinFolds[rune.Value] ??= rune.ToString().Normalize(NormalizationForm.FormD)
+                : rune.ToString().Normalize(NormalizationForm.FormD);
+            foreach (var c in decomposed)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark)
+                {
+                    continue;
+                }
+
+                if (count == chars.Length)
+                {
+                    Grow(ref chars, count);
+                    Grow(ref starts, count);
+                }
+
+                chars[count] = char.ToLowerInvariant(c);
+                starts[count++] = position;
+            }
+
+            position += length;
+        }
+
+        return new FoldedText(text, chars, starts, count);
+    }
+
+    private static void Grow<T>(ref T[] buffer, int used)
+    {
+        var larger = System.Buffers.ArrayPool<T>.Shared.Rent(buffer.Length * 2);
+        Array.Copy(buffer, larger, used);
+        System.Buffers.ArrayPool<T>.Shared.Return(buffer);
+        buffer = larger;
+    }
+
     private static string FoldCore(string text, List<int>? origStart, List<int>? origEndExclusive)
     {
         var builder = new StringBuilder(text.Length);
@@ -71,5 +133,37 @@ internal static class TextFold
         }
 
         return builder.ToString();
+    }
+}
+
+/// <summary>A folded text in pooled buffers, with the place of every folded char in the original (see <see cref="TextFold.FoldPooled"/>).</summary>
+internal sealed class FoldedText(string original, char[] chars, int[] starts, int length) : IDisposable
+{
+    private char[]? _chars = chars;
+    private int[]? _starts = starts;
+
+    /// <summary>The folded text.</summary>
+    internal ReadOnlySpan<char> Span => _chars.AsSpan(0, length);
+
+    /// <summary>Where the original rune of the folded char at <paramref name="index"/> starts.</summary>
+    internal int OrigStart(int index) => _starts![index];
+
+    /// <summary>Where the original rune of the folded char at <paramref name="index"/> ends (exclusive).</summary>
+    internal int OrigEnd(int index)
+    {
+        var start = _starts![index];
+        var pair = char.IsHighSurrogate(original[start]) && start + 1 < original.Length && char.IsLowSurrogate(original[start + 1]);
+        return start + (pair ? 2 : 1);
+    }
+
+    public void Dispose()
+    {
+        if (_chars is { } heldChars && _starts is { } heldStarts)
+        {
+            _chars = null;
+            _starts = null;
+            System.Buffers.ArrayPool<char>.Shared.Return(heldChars);
+            System.Buffers.ArrayPool<int>.Shared.Return(heldStarts);
+        }
     }
 }

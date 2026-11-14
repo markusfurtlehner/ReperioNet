@@ -329,9 +329,11 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
             // The text is folded once, for the boost and for the snippet (2.6.2).
             var content = includeSnippet ? documents[i].Content : null;
-            var map = content is null ? default : TextFold.FoldWithMap(content);
-            var folded = content is null ? null : map.Folded;
-            if (foldedQuery.Length > 0 && (folded ?? TextFold.Fold(text)).Contains(foldedQuery, StringComparison.Ordinal))
+            using var map = content is null ? null : TextFold.FoldPooled(content);
+            if (foldedQuery.Length > 0
+                && (map is null
+                    ? TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal)
+                    : map.Span.IndexOf(foldedQuery.AsSpan(), StringComparison.Ordinal) >= 0))
             {
                 score = Math.Min(1.0, score + 0.15);
             }
@@ -339,7 +341,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             scores[i] = score;
             if (content is not null && score >= options.MinScore)
             {
-                snippets[i] = SnippetBuilder.Build(content, map, tokens, options.Snippet);
+                snippets[i] = SnippetBuilder.Build(content, map!, tokens, options.Snippet);
             }
         }
 

@@ -17,22 +17,19 @@ internal static class SnippetBuilder
             return string.Empty;
         }
 
-        return Build(content, TextFold.FoldWithMap(content), queryTokens, options);
+        using var map = TextFold.FoldPooled(content);
+        return Build(content, map, queryTokens, options);
     }
 
     /// <summary>The same for a text whose folded form the caller already has.</summary>
-    internal static string Build(
-        string content,
-        (string Folded, List<int> OrigStart, List<int> OrigEndExclusive) map,
-        IReadOnlyList<string> queryTokens,
-        SnippetOptions options)
+    internal static string Build(string content, FoldedText map, IReadOnlyList<string> queryTokens, SnippetOptions options)
     {
         if (string.IsNullOrEmpty(content) || options.MaxLength <= 0)
         {
             return string.Empty;
         }
 
-        var (folded, origStart, origEnd) = map;
+        var folded = map.Span;
 
         var foldedTokens = new List<string>();
         foreach (var token in queryTokens)
@@ -49,7 +46,7 @@ internal static class SnippetBuilder
         var firstLength = 0;
         foreach (var token in foldedTokens)
         {
-            var index = folded.IndexOf(token, StringComparison.Ordinal);
+            var index = folded.IndexOf(token.AsSpan(), StringComparison.Ordinal);
             if (index >= 0 && (firstIndex < 0 || index < firstIndex))
             {
                 firstIndex = index;
@@ -65,8 +62,8 @@ internal static class SnippetBuilder
 
         // Window of up to MaxLength original characters centered on the first occurrence.
         var windowLength = Math.Min(options.MaxLength, content.Length);
-        var matchStart = origStart[firstIndex];
-        var matchEnd = origEnd[firstIndex + firstLength - 1];
+        var matchStart = map.OrigStart(firstIndex);
+        var matchEnd = map.OrigEnd(firstIndex + firstLength - 1);
         var start = ((matchStart + matchEnd) / 2) - (windowLength / 2);
         start = Math.Clamp(start, 0, content.Length - windowLength);
         var end = start + windowLength;
@@ -89,10 +86,11 @@ internal static class SnippetBuilder
         {
             var from = 0;
             int index;
-            while ((index = folded.IndexOf(token, from, StringComparison.Ordinal)) >= 0)
+            while (from <= folded.Length && (index = folded[from..].IndexOf(token.AsSpan(), StringComparison.Ordinal)) >= 0)
             {
-                var spanStart = origStart[index];
-                var spanEnd = origEnd[index + token.Length - 1];
+                index += from;
+                var spanStart = map.OrigStart(index);
+                var spanEnd = map.OrigEnd(index + token.Length - 1);
                 if (spanStart < end && spanEnd > start)
                 {
                     spans.Add((Math.Max(spanStart, start), Math.Min(spanEnd, end)));
