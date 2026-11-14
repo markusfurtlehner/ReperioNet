@@ -44,6 +44,16 @@ public sealed class SearchQueryOptions
     /// </summary>
     public int? ScorePoolSize { get; set; }
 
+    /// <summary>
+    /// Up to how many matches a query is ranked (2.6). A query that matches more documents than this is not ranked at all: its
+    /// matches (up to <see cref="CandidatePoolSize"/>, all-terms matches first, then in index order) come back with score 0 and no
+    /// snippet, and nothing is scored against a stored text. Ranking by bm25 visits every match, so a word that is in a tenth of a
+    /// large index costs hundreds of milliseconds before the first hit is known; listing the matches does not. The caller picks the
+    /// matches it wants ranked and passes them to <c>ScoreMatchesAsync</c>. A result with more matches than this limit is such an
+    /// unranked list. Default: <see langword="null"/> (every query is ranked).
+    /// </summary>
+    public int? RankLimit { get; set; }
+
     /// <summary>Snippet generation options.</summary>
     public SnippetOptions Snippet { get; set; } = new();
 }

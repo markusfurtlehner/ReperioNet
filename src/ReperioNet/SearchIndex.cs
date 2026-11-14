@@ -268,6 +268,96 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }, ct);
     }
 
+    /// <summary>
+    /// Scores the given documents against a query and returns them with score and snippet, best first (2.6): the fuzzy score and
+    /// the exact-match boost of <see cref="SearchAsync"/>, with the bm25 share at its best value, because no full-text query runs.
+    /// It is the second step after a search that came back unranked (<see cref="SearchQueryOptions.RankLimit"/>): the caller picks
+    /// the matches that matter to it (the newest, say) and has only those scored. An id the index does not hold is left out, and
+    /// so is a document under <see cref="SearchQueryOptions.MinScore"/>. Whether a document matches the query is not checked.
+    /// </summary>
+    /// <param name="query">The user query; null/whitespace yields an empty result.</param>
+    /// <param name="ids">The ids of the documents to score.</param>
+    /// <param name="options">Per-query options; <see langword="null"/> uses defaults. Offset, limit and the pool sizes do not apply.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task<IReadOnlyList<SearchMatch>> ScoreMatchesAsync(
+        string query,
+        IReadOnlyCollection<string> ids,
+        SearchQueryOptions? options = null,
+        CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(ids);
+        if (string.IsNullOrWhiteSpace(query) || ids.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyList<SearchMatch>>(Array.Empty<SearchMatch>());
+        }
+
+        var effectiveOptions = options ?? new SearchQueryOptions();
+        return RunReadAsync<IReadOnlyList<SearchMatch>>(connection => ScoreCore(connection, query, ids, effectiveOptions), ct);
+    }
+
+    private SearchMatch[] ScoreCore(SqliteConnection connection, string query, IReadOnlyCollection<string> ids, SearchQueryOptions options)
+    {
+        var documents = new List<(string DocId, string RankText, string? Content)>(ids.Count);
+        foreach (var chunk in ids.Distinct(StringComparer.Ordinal).Chunk(500))
+        {
+            using var command = connection.CreateCommand();
+            var names = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                names[i] = "@d" + i;
+                command.Parameters.AddWithValue(names[i], chunk[i]);
+            }
+
+            command.CommandText = $"SELECT doc_id, rank_text, content FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                documents.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        var tokens = Tokenizer.Tokenize(query);
+        var foldedQuery = TextFold.Fold(query);
+        var includeSnippet = options.IncludeSnippet && _options.StoreContent;
+        var scores = new double[documents.Count];
+        var snippets = new string?[documents.Count];
+        void Score(int i)
+        {
+            var text = documents[i].Content ?? documents[i].RankText;
+            var score = options.EnableFuzzy ? (0.6 * _options.FuzzyRanker.Score(query, text)) + 0.4 : 1.0;
+            if (foldedQuery.Length > 0 && TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal))
+            {
+                score = Math.Min(1.0, score + 0.15);
+            }
+
+            scores[i] = score;
+            if (includeSnippet && score >= options.MinScore && documents[i].Content is { } content)
+            {
+                snippets[i] = SnippetBuilder.Build(content, tokens, options.Snippet);
+            }
+        }
+
+        if (documents.Count >= ParallelScoreFrom)
+        {
+            Parallel.For(0, documents.Count, Score);
+        }
+        else
+        {
+            for (var i = 0; i < documents.Count; i++)
+            {
+                Score(i);
+            }
+        }
+
+        return Enumerable.Range(0, documents.Count)
+            .Where(i => scores[i] >= options.MinScore)
+            .OrderByDescending(i => scores[i])
+            .ThenBy(i => documents[i].DocId, StringComparer.Ordinal)
+            .Select(i => new SearchMatch(documents[i].DocId, scores[i], snippets[i]))
+            .ToArray();
+    }
+
     /// <summary>§9.13: metadata is deserialized only for the returned page.</summary>
     private IReadOnlyList<SearchHit<TMeta>> Project(List<RawHit> raw)
     {
@@ -646,9 +736,50 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // rowid. With TermMatch.AllTerms (default) and a multi-token query, a strict pass requires
         // every base term first; an any-term pass widens recall only when the strict pass yields
         // fewer than Limit candidates. All-terms candidates always rank ahead (tier 0).
+        var useAllTerms = options.TermMatch == TermMatch.AllTerms && tokens.Count > 1;
+
+        // 2.6: with a RankLimit the matches are first only listed (no bm25, which visits every match). A query with more matches
+        // than the limit is answered from that list, unranked; any other is gathered again with its ranks, which is cheap then.
+        Dictionary<long, double> primary;
+        Dictionary<long, double> secondary;
+        if (options.RankLimit is { } rankLimit)
+        {
+            (primary, secondary) = Gather(ranked: false);
+            if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
+            {
+                return Unranked();
+            }
+
+            if (primary.Count + secondary.Count > 0)
+            {
+                (primary, secondary) = Gather(ranked: true);
+            }
+        }
+        else
+        {
+            (primary, secondary) = Gather(ranked: true);
+        }
+
+        List<RawHit> Unranked()
+        {
+            var rowids = primary.Keys.Order().Concat(secondary.Keys.Order()).Take(Math.Max(0, options.CandidatePoolSize)).ToList();
+            var keys = keysOnly ? LoadDocumentIds(connection, rowids) : LoadDocumentKeys(connection, rowids);
+            var listed = new List<RawHit>(rowids.Count);
+            foreach (var rowid in rowids.Skip(Math.Max(0, options.Offset)).Take(Math.Max(0, options.Limit)))
+            {
+                if (keys.TryGetValue(rowid, out var key))
+                {
+                    listed.Add(new RawHit(key.DocId, key.MetadataJson, 0, null));
+                }
+            }
+
+            return listed;
+        }
+
+        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked)
+        {
         var primary = new Dictionary<long, double>();
         var secondary = new Dictionary<long, double>();
-        var useAllTerms = options.TermMatch == TermMatch.AllTerms && tokens.Count > 1;
 
         // §9.6: the escaped full query string against the trigram table (substring recall). It runs beside the token queries on a
         // connection of its own (2.5): ranking every match of a common word costs about as much in either table, and a query that
@@ -660,7 +791,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 using var second = SqliteConnectionFactory.Open(_connectionString);
                 var found = new Dictionary<long, double>();
-                CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, found);
+                CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, found, ranked);
                 return found;
             });
         }
@@ -701,13 +832,13 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 // Strict pass: implicit-AND on base only (cheap — the intersection is small).
                 var andMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: false, stemTokens: null, phoneticTokens: null, allTermsBase: true);
-                CollectCandidates(connection, "documents_fts", andMatch, options.CandidatePoolSize, primary);
+                CollectCandidates(connection, "documents_fts", andMatch, options.CandidatePoolSize, primary, ranked);
 
                 if (primary.Count < Math.Max(0, options.Limit))
                 {
                     // Recall fallback: the classic §9.5 any-term expression incl. stem/phonetic.
                     var orMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
-                    CollectCandidates(connection, "documents_fts", orMatch, options.CandidatePoolSize, secondary);
+                    CollectCandidates(connection, "documents_fts", orMatch, options.CandidatePoolSize, secondary, ranked);
                 }
             }
             else
@@ -715,7 +846,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 // §9.5: OR-combined column clauses, plus the short-query prefix aid on base when
                 // the whole query is < 3 chars.
                 var match = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
-                CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, primary);
+                CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, primary, ranked);
             }
         }
 
@@ -728,7 +859,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             var target = useAllTerms ? secondary : primary;
             if (trigram is null)
             {
-                CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, target);
+                CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, target, ranked);
             }
             else
             {
@@ -757,6 +888,9 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 secondary.Remove(rowid);
             }
+        }
+
+        return (primary, secondary);
         }
 
         if (primary.Count == 0 && secondary.Count == 0)
@@ -1017,11 +1151,13 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         string table,
         string match,
         int poolSize,
-        Dictionary<long, double> bestRank)
+        Dictionary<long, double> bestRank,
+        bool ranked)
     {
         using var command = connection.CreateCommand();
-        command.CommandText =
-            $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match ORDER BY rank, rowid LIMIT @pool;";
+        command.CommandText = ranked
+            ? $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match ORDER BY rank, rowid LIMIT @pool;"
+            : $"SELECT rowid, 0.0 AS rank FROM {table} WHERE {table} MATCH @match LIMIT @pool;";
         command.Parameters.AddWithValue("@match", match);
         command.Parameters.AddWithValue("@pool", poolSize);
 
