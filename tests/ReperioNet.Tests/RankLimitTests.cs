@@ -143,6 +143,27 @@ public class RankLimitTests
     }
 
     [Fact]
+    public async Task ScoreMatches_OfALongList_ReadInParts_GivesEachDocumentWhatItGetsAlone()
+    {
+        using var db = new TestDatabase();
+        await using var index = await SeedAsync(db);
+        // 1,000 ids (2.6.3 reads their texts in parts, side by side), some of them twice and some unknown.
+        var picked = Enumerable.Range(1, 1000).Select(i => $"doc-{i:D4}").Concat(["doc-0003", "missing-1", "missing-2"]).ToArray();
+
+        var together = await index.ScoreMatchesAsync("omega", picked, Options(rankLimit: 200));
+
+        Assert.Equal(1000, together.Count);
+        Assert.Equal(1000, together.Select(m => m.Id).Distinct().Count());
+        Assert.Equal(together.OrderByDescending(m => m.Score).ThenBy(m => m.Id, StringComparer.Ordinal).Select(m => m.Id), together.Select(m => m.Id));
+        foreach (var id in new[] { "doc-0001", "doc-0064", "doc-0065", "doc-0500", "doc-0999", "doc-1000" })
+        {
+            var alone = Assert.Single(await index.ScoreMatchesAsync("omega", new[] { id }, Options(rankLimit: 200)));
+            var among = together.Single(m => m.Id == id);
+            Assert.Equal((alone.Score, alone.Snippet), (among.Score, among.Snippet));
+        }
+    }
+
+    [Fact]
     public async Task ScoreMatches_DropsWhatIsUnderMinScore()
     {
         using var db = new TestDatabase();

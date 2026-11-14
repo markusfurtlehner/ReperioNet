@@ -298,24 +298,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
     private SearchMatch[] ScoreCore(SqliteConnection connection, string query, IReadOnlyCollection<string> ids, SearchQueryOptions options)
     {
-        var documents = new List<(string DocId, string RankText, string? Content)>(ids.Count);
-        foreach (var chunk in ids.Distinct(StringComparer.Ordinal).Chunk(500))
-        {
-            using var command = connection.CreateCommand();
-            var names = new string[chunk.Length];
-            for (var i = 0; i < chunk.Length; i++)
-            {
-                names[i] = "@d" + i;
-                command.Parameters.AddWithValue(names[i], chunk[i]);
-            }
-
-            command.CommandText = $"SELECT doc_id, rank_text, content FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                documents.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
-            }
-        }
+        var documents = LoadTextsInParts(connection, ids.Distinct(StringComparer.Ordinal).ToArray());
 
         var tokens = Tokenizer.Tokenize(query);
         var foldedQuery = TextFold.Fold(query);
@@ -363,6 +346,81 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             .ThenBy(i => documents[i].DocId, StringComparer.Ordinal)
             .Select(i => new SearchMatch(documents[i].DocId, scores[i], snippets[i]))
             .ToArray();
+    }
+
+    /// <summary>A list of ids is read with its texts in parts of this many (2.6.3).</summary>
+    private const int TextPartSize = 64;
+
+    /// <summary>
+    /// The stored texts of the given documents (2.6.3). From two parts on, the parts are read side by side, each on a connection of
+    /// its own: reading the 500 mail texts of a scored list (4 MB) in one statement took longer than scoring them on every core.
+    /// </summary>
+    private List<(string DocId, string RankText, string? Content)> LoadTextsInParts(SqliteConnection connection, string[] ids)
+    {
+        var parts = Math.Min(Math.Min(Environment.ProcessorCount, 8), ids.Length / TextPartSize);
+        if (parts < 2)
+        {
+            return LoadTexts(connection, ids);
+        }
+
+        var size = (ids.Length + parts - 1) / parts;
+        var others = new Task<List<(string DocId, string RankText, string? Content)>>[parts - 1];
+        for (var i = 1; i < parts; i++)
+        {
+            var part = new ArraySegment<string>(ids, i * size, Math.Min(size, ids.Length - (i * size)));
+            others[i - 1] = Task.Run(() =>
+            {
+                using var own = SqliteConnectionFactory.Open(_connectionString);
+                return LoadTexts(own, part);
+            });
+        }
+
+        List<(string DocId, string RankText, string? Content)> all;
+        try
+        {
+            all = LoadTexts(connection, new ArraySegment<string>(ids, 0, size));
+        }
+        catch
+        {
+            // The other reads must not outlive a failed call unobserved.
+            try { Task.WaitAll(others); }
+            catch { }
+
+            throw;
+        }
+
+        all.EnsureCapacity(ids.Length);
+        foreach (var other in others)
+        {
+            all.AddRange(other.GetAwaiter().GetResult());
+        }
+
+        return all;
+    }
+
+    /// <summary>The stored texts of the given documents, read on one connection.</summary>
+    private static List<(string DocId, string RankText, string? Content)> LoadTexts(SqliteConnection connection, IReadOnlyList<string> ids)
+    {
+        var documents = new List<(string DocId, string RankText, string? Content)>(ids.Count);
+        foreach (var chunk in ids.Chunk(500))
+        {
+            using var command = connection.CreateCommand();
+            var names = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                names[i] = "@d" + i;
+                command.Parameters.AddWithValue(names[i], chunk[i]);
+            }
+
+            command.CommandText = $"SELECT doc_id, rank_text, content FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                documents.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        return documents;
     }
 
     /// <summary>§9.13: metadata is deserialized only for the returned page.</summary>
