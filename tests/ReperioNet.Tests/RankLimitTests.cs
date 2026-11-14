@@ -76,6 +76,37 @@ public class RankLimitTests
         Assert.Equal(Enumerable.Range(1, many).Select(i => $"doc-{i:D5}"), matches.Select(m => m.Id));
     }
 
+    [Fact]
+    public async Task AWordOverTheLimitByItself_IsListedWithoutItsSoundAlikes()
+    {
+        // 2.6.1. "Müller" and "Mueller" share the vowel-stripped code "mllr".
+        using var db = new TestDatabase();
+        await using var index = await TestOptions.OpenAsync(db, o =>
+        {
+            o.EnableTrigram = false;
+            o.Analyzers.Register(TestAnalyzerFactory.VowelStripPhonetic());
+        });
+        await index.AddRangeAsync(Enumerable.Range(1, 30).Select(i => TestOptions.Entry($"own-{i:D2}", $"Herr Müller {i}", language: "de")));
+        await index.AddRangeAsync(Enumerable.Range(1, 30).Select(i => TestOptions.Entry($"alike-{i:D2}", $"Herr Mueller {i}", language: "de")));
+        SearchQueryOptions Ask(int rankLimit) => new() { Language = "de", Limit = 500, CandidatePoolSize = 500, RankLimit = rankLimit };
+
+        // The word itself is over the limit: its own matches, unranked.
+        var own = await index.SearchMatchesAsync("Müller", Ask(rankLimit: 20));
+        Assert.Equal(30, own.Count);
+        Assert.All(own, m => Assert.StartsWith("own-", m.Id));
+        Assert.All(own, m => Assert.Equal(0d, m.Score));
+
+        // Only with its sound-alikes is it over the limit: all of them, unranked.
+        var all = await index.SearchMatchesAsync("Müller", Ask(rankLimit: 40));
+        Assert.Equal(60, all.Count);
+        Assert.All(all, m => Assert.Equal(0d, m.Score));
+
+        // Within the limit: ranked, sound-alikes included, as without a limit.
+        var ranked = await index.SearchMatchesAsync("Müller", Ask(rankLimit: 60));
+        Assert.Equal(60, ranked.Count);
+        Assert.All(ranked, m => Assert.True(m.Score > 0));
+    }
+
     [Theory]
     [InlineData("kiwi")]
     [InlineData("omega")]

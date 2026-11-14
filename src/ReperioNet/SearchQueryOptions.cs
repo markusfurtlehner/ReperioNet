@@ -50,7 +50,8 @@ public sealed class SearchQueryOptions
     /// snippet, and nothing is scored against a stored text. Ranking by bm25 visits every match, so a word that is in a tenth of a
     /// large index costs hundreds of milliseconds before the first hit is known; listing the matches does not. The caller picks the
     /// matches it wants ranked and passes them to <c>ScoreMatchesAsync</c>. A result with more matches than this limit is such an
-    /// unranked list. Default: <see langword="null"/> (every query is ranked).
+    /// unranked list. A word that by itself (and by its stem and as a substring) is in more documents than the limit is listed
+    /// without its phonetic sound-alikes (2.6.1). Default: <see langword="null"/> (every query is ranked).
     /// </summary>
     public int? RankLimit { get; set; }
 

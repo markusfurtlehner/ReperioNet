@@ -744,20 +744,32 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         Dictionary<long, double> secondary;
         if (options.RankLimit is { } rankLimit)
         {
-            (primary, secondary) = Gather(ranked: false);
+            // 2.6.1: first without the sound-alikes. A word that is itself in more documents than the limit is answered from its own
+            // matches; the phonetic clause made that listing up to twice as slow and added only noise to such a word.
+            var soundAlikes = tokens.Count > 0 && _options.EnablePhonetic && options.EnablePhonetic;
+            (primary, secondary) = Gather(ranked: false, phonetic: false);
             if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
             {
                 return Unranked();
             }
 
+            if (soundAlikes)
+            {
+                (primary, secondary) = Gather(ranked: false, phonetic: true);
+                if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
+                {
+                    return Unranked();
+                }
+            }
+
             if (primary.Count + secondary.Count > 0)
             {
-                (primary, secondary) = Gather(ranked: true);
+                (primary, secondary) = Gather(ranked: true, phonetic: true);
             }
         }
         else
         {
-            (primary, secondary) = Gather(ranked: true);
+            (primary, secondary) = Gather(ranked: true, phonetic: true);
         }
 
         List<RawHit> Unranked()
@@ -776,7 +788,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             return listed;
         }
 
-        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked)
+        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked, bool phonetic)
         {
         var primary = new Dictionary<long, double>();
         var secondary = new Dictionary<long, double>();
@@ -824,7 +836,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             var stemTokens = _options.EnableStemming
                 ? Analysis.StemTokens(analyzer, tokens, _options.RemoveStopWords)
                 : null;
-            var phoneticTokens = _options.EnablePhonetic && options.EnablePhonetic
+            var phoneticTokens = phonetic && _options.EnablePhonetic && options.EnablePhonetic
                 ? Analysis.PhoneticTokens(analyzer, tokens, _options.RemoveStopWords)
                 : null;
 
