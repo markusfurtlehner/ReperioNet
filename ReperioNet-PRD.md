@@ -152,6 +152,7 @@ public sealed class SearchQueryOptions
     public string? Language { get; set; }
     public bool   IncludeSnippet { get; set; } = false;    // requires StoreContent = true
     public int    CandidatePoolSize { get; set; } = 300;
+    public int?   ScorePoolSize { get; set; }           // 2.3.0: null = score the whole pool; N = fuzzy-score, boost, MinScore and snippet only for the best N (tier, bm25); the tail keeps 0.4 x normalized bm25, no snippet, text never loaded
     public TermMatch TermMatch { get; set; } = TermMatch.AllTerms;  // see §9.5
     public SnippetOptions Snippet { get; set; } = new();
 }

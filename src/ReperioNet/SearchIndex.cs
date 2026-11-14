@@ -672,8 +672,15 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             return EmptyHits;
         }
 
-        // §9.8: load metadata, rank_text and content (if stored) for each candidate.
-        var documents = LoadDocuments(connection, pool.Select(candidate => candidate.Rowid));
+        // §9.8: load metadata, rank_text and content (if stored) for the candidates that are scored against their text: the whole
+        // pool, or its best ScorePoolSize (by tier, then bm25) when that is set. The rest of the pool (the tail) is still returned,
+        // with its bm25 share as the score, but its text is never loaded, folded or fuzzy-scored: that work grows with the pool and
+        // with the size of the stored texts, and a caller that only needs to know which documents match does not want to pay it.
+        var scoreCount = options.ScorePoolSize is { } scorePool ? Math.Clamp(scorePool, 0, pool.Count) : pool.Count;
+        var documents = LoadDocuments(connection, pool.Take(scoreCount).Select(candidate => candidate.Rowid));
+        var tailDocuments = scoreCount < pool.Count
+            ? LoadDocumentKeys(connection, pool.Skip(scoreCount).Select(candidate => candidate.Rowid))
+            : null;
 
         // §9.9: normalize bm25 across the pool (lower is better; best maps to 1.0).
         var min = pool[0].Rank;
@@ -686,14 +693,27 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
         var foldedQuery = TextFold.Fold(query);
         var scored = new List<(int Tier, double Score, string DocId, string MetadataJson, string? Content)>(pool.Count);
-        foreach (var (rowid, rank, tier) in pool)
+        for (var i = 0; i < pool.Count; i++)
         {
+            var (rowid, rank, tier) = pool[i];
+            var normBm25 = max > min ? (max - rank) / (max - min) : 1.0;
+
+            if (i >= scoreCount)
+            {
+                // The tail: a lexical match that is not scored against its text. Its score is the bm25 share of the blend, so it
+                // sorts behind the scored candidates of its tier; MinScore does not apply to it.
+                if (tailDocuments!.TryGetValue(rowid, out var key))
+                {
+                    scored.Add((tier, 0.4 * normBm25, key.DocId, key.MetadataJson, null));
+                }
+
+                continue;
+            }
+
             if (!documents.TryGetValue(rowid, out var doc))
             {
                 continue;
             }
-
-            var normBm25 = max > min ? (max - rank) / (max - min) : 1.0;
 
             // §9.10: fuzzy pass against content when stored, else rank_text.
             var text = doc.Content ?? doc.RankText;
@@ -740,6 +760,31 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         return hits;
+    }
+
+    /// <summary>Loads only <c>doc_id</c> and metadata JSON for candidate rowids that are not scored against their text.</summary>
+    private static Dictionary<long, (string DocId, string MetadataJson)> LoadDocumentKeys(SqliteConnection connection, IEnumerable<long> rowids)
+    {
+        var documents = new Dictionary<long, (string, string)>();
+        foreach (var chunk in rowids.Chunk(500))
+        {
+            using var command = connection.CreateCommand();
+            var names = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                names[i] = "@r" + i;
+                command.Parameters.AddWithValue(names[i], chunk[i]);
+            }
+
+            command.CommandText = $"SELECT rowid, doc_id, metadata FROM documents WHERE rowid IN ({string.Join(", ", names)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                documents[reader.GetInt64(0)] = (reader.GetString(1), reader.GetString(2));
+            }
+        }
+
+        return documents;
     }
 
     /// <summary>Runs one MATCH query and merges (rowid, bm25) results into <paramref name="bestRank"/>, keeping the lowest bm25 per rowid.</summary>

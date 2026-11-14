@@ -102,7 +102,7 @@ and call `RebuildAsync()` after changing flags, or start a new database file.
 - `RemoveStopWords` (default off): strips stop words from the stem/phonetic streams only, never from base.
 - `MaxContentChars` (default 0 = unbounded): caps the indexed text length.
 - `EncryptionKey` (default none, 2.2): a 32-byte key that encrypts the index file and its WAL (see *Encryption at rest* below).
-- `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`.
+- `SearchQueryOptions`: `Limit`/`Offset`, `MinScore`, `EnableFuzzy`, `EnablePhonetic`, `Language`, `IncludeSnippet`, `CandidatePoolSize`, `ScorePoolSize` (score only the best N candidates against their stored text; the rest of the pool is returned behind them with its bm25 share as the score and no snippet, and its text is never loaded: for large pools over long texts).
 
 ## Grouped, ordered queries (2.1)
 

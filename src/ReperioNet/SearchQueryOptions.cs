@@ -35,6 +35,15 @@ public sealed class SearchQueryOptions
     /// <summary>Size of the candidate pool gathered before re-ranking. Default: 300.</summary>
     public int CandidatePoolSize { get; set; } = 300;
 
+    /// <summary>
+    /// How many of the best candidates (by term-match tier, then bm25) are scored against their stored text: fuzzy score, exact-match
+    /// boost, <see cref="MinScore"/> and snippet. The rest of the pool is still returned, behind them within its tier, with the bm25
+    /// share of the blend (0.4 x normalized bm25) as its score and no snippet; its text is never loaded. Default: <see langword="null"/>
+    /// (the whole pool is scored). Set it when the pool is large and only the first hits need an exact rank: the cost of a search
+    /// otherwise grows with the pool times the size of the stored texts.
+    /// </summary>
+    public int? ScorePoolSize { get; set; }
+
     /// <summary>Snippet generation options.</summary>
     public SnippetOptions Snippet { get; set; } = new();
 }
