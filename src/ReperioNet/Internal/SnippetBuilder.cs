@@ -17,7 +17,22 @@ internal static class SnippetBuilder
             return string.Empty;
         }
 
-        var (folded, origStart, origEnd) = TextFold.FoldWithMap(content);
+        return Build(content, TextFold.FoldWithMap(content), queryTokens, options);
+    }
+
+    /// <summary>The same for a text whose folded form the caller already has.</summary>
+    internal static string Build(
+        string content,
+        (string Folded, List<int> OrigStart, List<int> OrigEndExclusive) map,
+        IReadOnlyList<string> queryTokens,
+        SnippetOptions options)
+    {
+        if (string.IsNullOrEmpty(content) || options.MaxLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var (folded, origStart, origEnd) = map;
 
         var foldedTokens = new List<string>();
         foreach (var token in queryTokens)

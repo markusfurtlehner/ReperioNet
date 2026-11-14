@@ -326,15 +326,20 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         {
             var text = documents[i].Content ?? documents[i].RankText;
             var score = options.EnableFuzzy ? (0.6 * _options.FuzzyRanker.Score(query, text)) + 0.4 : 1.0;
-            if (foldedQuery.Length > 0 && TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal))
+
+            // The text is folded once, for the boost and for the snippet (2.6.2).
+            var content = includeSnippet ? documents[i].Content : null;
+            var map = content is null ? default : TextFold.FoldWithMap(content);
+            var folded = content is null ? null : map.Folded;
+            if (foldedQuery.Length > 0 && (folded ?? TextFold.Fold(text)).Contains(foldedQuery, StringComparison.Ordinal))
             {
                 score = Math.Min(1.0, score + 0.15);
             }
 
             scores[i] = score;
-            if (includeSnippet && score >= options.MinScore && documents[i].Content is { } content)
+            if (content is not null && score >= options.MinScore)
             {
-                snippets[i] = SnippetBuilder.Build(content, tokens, options.Snippet);
+                snippets[i] = SnippetBuilder.Build(content, map, tokens, options.Snippet);
             }
         }
 
