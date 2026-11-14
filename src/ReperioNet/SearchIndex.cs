@@ -289,6 +289,9 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
     private static readonly List<RawHit> NoRawHits = new();
 
+    /// <summary>From this many candidates the scoring against their texts runs in parallel.</summary>
+    private const int ParallelScoreFrom = 64;
+
     /// <summary>Runs FTS <c>optimize</c> on the search tables, then <c>PRAGMA optimize</c> and a WAL checkpoint.</summary>
     /// <param name="ct">Cancellation token.</param>
     public Task OptimizeAsync(CancellationToken ct = default)
@@ -644,6 +647,39 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         var secondary = new Dictionary<long, double>();
         var useAllTerms = options.TermMatch == TermMatch.AllTerms && tokens.Count > 1;
 
+        // §9.6: the escaped full query string against the trigram table (substring recall). It runs beside the token queries on a
+        // connection of its own (2.5): ranking every match of a common word costs about as much in either table, and a query that
+        // has tokens used to pay the two one after the other.
+        Task<Dictionary<long, double>>? trigram = null;
+        if (useTrigram && tokens.Count > 0)
+        {
+            trigram = Task.Run(() =>
+            {
+                using var second = SqliteConnectionFactory.Open(_connectionString);
+                var found = new Dictionary<long, double>();
+                CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, found);
+                return found;
+            });
+        }
+
+        try
+        {
+            GatherByTokens();
+        }
+        catch
+        {
+            // The trigram query must not outlive a failed search unobserved.
+            if (trigram is not null)
+            {
+                try { trigram.GetAwaiter().GetResult(); }
+                catch { }
+            }
+
+            throw;
+        }
+
+        void GatherByTokens()
+        {
         if (tokens.Count > 0)
         {
             // §9.2: resolve the query language and pick its analyzer (or the identity fallback).
@@ -680,12 +716,27 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             }
         }
 
+        }
+
         if (useTrigram)
         {
-            // §9.6: the escaped full query string against the trigram table (substring recall).
             // In all-terms mode substring matches join the fallback tier unless the document also
             // satisfied the strict pass.
-            CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, useAllTerms ? secondary : primary);
+            var target = useAllTerms ? secondary : primary;
+            if (trigram is null)
+            {
+                CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, target);
+            }
+            else
+            {
+                foreach (var (rowid, rank) in trigram.GetAwaiter().GetResult())
+                {
+                    if (!target.TryGetValue(rowid, out var existing) || rank < existing)
+                    {
+                        target[rowid] = rank;
+                    }
+                }
+            }
         }
 
         // Dedup across tiers: a rowid seen by the strict pass stays tier 0 with its best bm25.
@@ -749,6 +800,50 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         var foldedQuery = TextFold.Fold(query);
+
+        // §9.10/§9.11: the fuzzy pass and the exact-match boost read only the candidate's own text, so from a few dozen candidates
+        // on they run on every core (2.5); the result is the same in any order.
+        var textScores = new double[scoreCount];
+        void ScoreText(int i)
+        {
+            var (rowid, rank, _) = pool[i];
+            if (!documents.TryGetValue(rowid, out var doc))
+            {
+                textScores[i] = double.NaN;
+                return;
+            }
+
+            var normBm25 = max > min ? (max - rank) / (max - min) : 1.0;
+
+            // §9.10: fuzzy pass against content when stored, else rank_text.
+            var text = doc.Content ?? doc.RankText;
+
+            // §9.11: blend, or pure normalized bm25 when fuzzy is off.
+            var score = options.EnableFuzzy
+                ? (0.6 * _options.FuzzyRanker.Score(query, text)) + (0.4 * normBm25)
+                : normBm25;
+
+            // §9.11 exact-match boost: folded text contains the folded raw query as a substring.
+            if (foldedQuery.Length > 0 && TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal))
+            {
+                score = Math.Min(1.0, score + 0.15);
+            }
+
+            textScores[i] = score;
+        }
+
+        if (scoreCount >= ParallelScoreFrom)
+        {
+            Parallel.For(0, scoreCount, ScoreText);
+        }
+        else
+        {
+            for (var i = 0; i < scoreCount; i++)
+            {
+                ScoreText(i);
+            }
+        }
+
         var scored = new List<(int Tier, double Score, string DocId, string? MetadataJson, string? Content)>(pool.Count);
         for (var i = 0; i < pool.Count; i++)
         {
@@ -767,23 +862,10 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 continue;
             }
 
-            if (!documents.TryGetValue(rowid, out var doc))
+            var score = textScores[i];
+            if (double.IsNaN(score) || !documents.TryGetValue(rowid, out var doc))
             {
                 continue;
-            }
-
-            // §9.10: fuzzy pass against content when stored, else rank_text.
-            var text = doc.Content ?? doc.RankText;
-
-            // §9.11: blend, or pure normalized bm25 when fuzzy is off.
-            var score = options.EnableFuzzy
-                ? (0.6 * _options.FuzzyRanker.Score(query, text)) + (0.4 * normBm25)
-                : normBm25;
-
-            // §9.11 exact-match boost: folded text contains the folded raw query as a substring.
-            if (foldedQuery.Length > 0 && TextFold.Fold(text).Contains(foldedQuery, StringComparison.Ordinal))
-            {
-                score = Math.Min(1.0, score + 0.15);
             }
 
             // §9.12: drop scores below MinScore.
