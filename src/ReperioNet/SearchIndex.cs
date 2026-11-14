@@ -763,7 +763,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         List<RawHit> Unranked()
         {
             var rowids = primary.Keys.Order().Concat(secondary.Keys.Order()).Take(Math.Max(0, options.CandidatePoolSize)).ToList();
-            var keys = keysOnly ? LoadDocumentIds(connection, rowids) : LoadDocumentKeys(connection, rowids);
+            var keys = keysOnly ? LoadDocumentIdsInParts(connection, rowids) : LoadDocumentKeys(connection, rowids);
             var listed = new List<RawHit>(rowids.Count);
             foreach (var rowid in rowids.Skip(Math.Max(0, options.Offset)).Take(Math.Max(0, options.Limit)))
             {
@@ -1118,6 +1118,59 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
 
         return documents;
+    }
+
+    /// <summary>A list of rowids is read in parts from this many on (2.6.1).</summary>
+    private const int KeyPartSize = 4096;
+
+    /// <summary>
+    /// <see cref="LoadDocumentIds"/> for a long list (2.6.1): the list is cut into parts that are read side by side, each on a
+    /// connection of its own. Reading the ids of 50,000 listed matches in one statement was the largest part of an unranked query.
+    /// </summary>
+    private Dictionary<long, (string DocId, string? MetadataJson)> LoadDocumentIdsInParts(SqliteConnection connection, List<long> rowids)
+    {
+        var parts = Math.Min(Math.Min(Environment.ProcessorCount, 8), rowids.Count / KeyPartSize);
+        if (parts < 2)
+        {
+            return LoadDocumentIds(connection, rowids);
+        }
+
+        var size = (rowids.Count + parts - 1) / parts;
+        var others = new Task<Dictionary<long, (string DocId, string? MetadataJson)>>[parts - 1];
+        for (var i = 1; i < parts; i++)
+        {
+            var part = rowids.GetRange(i * size, Math.Min(size, rowids.Count - i * size));
+            others[i - 1] = Task.Run(() =>
+            {
+                using var own = SqliteConnectionFactory.Open(_connectionString);
+                return LoadDocumentIds(own, part);
+            });
+        }
+
+        Dictionary<long, (string DocId, string? MetadataJson)> all;
+        try
+        {
+            all = LoadDocumentIds(connection, rowids.GetRange(0, size));
+        }
+        catch
+        {
+            // The other reads must not outlive a failed search unobserved.
+            try { Task.WaitAll(others); }
+            catch { }
+
+            throw;
+        }
+
+        all.EnsureCapacity(rowids.Count);
+        foreach (var other in others)
+        {
+            foreach (var (rowid, key) in other.GetAwaiter().GetResult())
+            {
+                all[rowid] = key;
+            }
+        }
+
+        return all;
     }
 
     /// <summary>Loads only <c>doc_id</c> and metadata JSON for candidate rowids that are not scored against their text.</summary>

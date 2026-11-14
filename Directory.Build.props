@@ -2,7 +2,7 @@
 
   <!-- Shared package metadata (PRD §12). Core and language packs are versioned in lockstep. -->
   <PropertyGroup>
-    <Version>2.6.0</Version>
+    <Version>2.6.1</Version>
     <Authors>Markus Furtlehner</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageTags>search;fts5;sqlite;fuzzy;full-text-search;multilingual;embedded;cross-platform</PackageTags>

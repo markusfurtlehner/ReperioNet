@@ -57,6 +57,25 @@ public class RankLimitTests
         Assert.Equal(all.Skip(50).Take(100), page.Select(m => m.Id));
     }
 
+    [Fact]
+    public async Task ALongUnrankedList_ReadInParts_ListsEveryMatchOnceInItsOrder()
+    {
+        // 2.6.1: from 8,192 listed matches on, the ids are read in parts on several connections.
+        const int many = 20_000;
+        using var db = new TestDatabase();
+        await using var index = await TestOptions.OpenAsync(db, o =>
+        {
+            o.EnableStemming = false;
+            o.StoreContent = true;
+        });
+        await index.AddRangeAsync(Enumerable.Range(1, many).Select(i => TestOptions.Entry($"doc-{i:D5}", $"omega filler {i}")));
+        var options = new SearchQueryOptions { Limit = 50_000, CandidatePoolSize = 50_000, RankLimit = 200 };
+
+        var matches = await index.SearchMatchesAsync("omega", options);
+
+        Assert.Equal(Enumerable.Range(1, many).Select(i => $"doc-{i:D5}"), matches.Select(m => m.Id));
+    }
+
     [Theory]
     [InlineData("kiwi")]
     [InlineData("omega")]
