@@ -25,6 +25,15 @@ internal static class TextFold
         return (folded, starts, ends);
     }
 
+    /// <summary>The first code point with a canonical decomposition (U+00C0, À).</summary>
+    private const int FirstDecomposable = 0xC0;
+
+    /// <summary>
+    /// The decompositions of the Latin letters up to U+024F, kept once they were asked for. Two threads may fill an entry at the
+    /// same time; both write the same text.
+    /// </summary>
+    private static readonly string?[] LatinFolds = new string?[0x250];
+
     private static string FoldCore(string text, List<int>? origStart, List<int>? origEndExclusive)
     {
         var builder = new StringBuilder(text.Length);
@@ -32,7 +41,20 @@ internal static class TextFold
         foreach (var rune in text.EnumerateRunes())
         {
             var length = rune.Utf16SequenceLength;
-            var decomposed = rune.ToString().Normalize(NormalizationForm.FormD);
+            if (rune.Value < FirstDecomposable)
+            {
+                // 2.6.2: below U+00C0 nothing decomposes and nothing is a combining mark, so the fold is the lowercase letter.
+                // Normalizing every character on its own cost a string per character, twice per scored text.
+                builder.Append(char.ToLowerInvariant((char)rune.Value));
+                origStart?.Add(position);
+                origEndExclusive?.Add(position + length);
+                position += length;
+                continue;
+            }
+
+            var decomposed = rune.Value < LatinFolds.Length
+                ? LatinFolds[rune.Value] ??= rune.ToString().Normalize(NormalizationForm.FormD)
+                : rune.ToString().Normalize(NormalizationForm.FormD);
             foreach (var c in decomposed)
             {
                 if (CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark)
