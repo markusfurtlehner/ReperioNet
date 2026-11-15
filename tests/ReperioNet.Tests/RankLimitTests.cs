@@ -41,6 +41,29 @@ public class RankLimitTests
         Assert.All(hits, h => Assert.NotNull(h.Metadata));
     }
 
+    [Theory]
+    [InlineData("omega", null)]
+    [InlineData("omega", 200)]
+    [InlineData("kiwi", null)]
+    [InlineData("kiwi", 200)]
+    [InlineData("kiwy", 200)]
+    [InlineData("filler omega", 2000)]
+    [InlineData("nosuchword", 200)]
+    public async Task ListOnly_ListsTheDocumentsTheRankedSearchFinds_WithoutScoreOrSnippet(string query, int? rankLimit)
+    {
+        using var db = new TestDatabase();
+        await using var index = await SeedAsync(db);
+
+        var ranked = await index.SearchMatchesAsync(query, Options(rankLimit));
+        var options = Options(rankLimit);
+        options.ListOnly = true;
+        var listed = await index.SearchMatchesAsync(query, options);
+
+        Assert.Equal(ranked.Select(m => m.Id).Order(StringComparer.Ordinal), listed.Select(m => m.Id).Order(StringComparer.Ordinal));
+        Assert.Equal(listed.Count, listed.Select(m => m.Id).Distinct().Count());
+        Assert.All(listed, m => Assert.Equal((0d, (string?)null), (m.Score, m.Snippet)));
+    }
+
     [Fact]
     public async Task AQueryOverTheLimit_HonoursPoolOffsetAndLimit()
     {

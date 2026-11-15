@@ -1013,7 +1013,20 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // than the limit is answered from that list, unranked; any other is gathered again with its ranks, which is cheap then.
         Dictionary<long, double> primary;
         Dictionary<long, double> secondary;
-        if (options.RankLimit is { } rankLimit)
+        if (options.ListOnly)
+        {
+            // 2.8: the caller wants the matches and no rank: they are listed, with the sound-alikes unless the word by itself is
+            // over a RankLimit (the rule of 2.6.1, so that the documents are those of the ranked search).
+            (primary, secondary) = Gather(ranked: false, phonetic: false);
+            if (tokens.Count > 0 && _options.EnablePhonetic && options.EnablePhonetic
+                && (options.RankLimit is not { } listLimit || primary.Count + secondary.Count <= Math.Max(0, listLimit)))
+            {
+                (primary, secondary) = Gather(ranked: false, phonetic: true);
+            }
+
+            return Unranked();
+        }
+        else if (options.RankLimit is { } rankLimit)
         {
             // 2.6.1: first without the sound-alikes. A word that is itself in more documents than the limit is answered from its own
             // matches; the phonetic clause made that listing up to twice as slow and added only noise to such a word.

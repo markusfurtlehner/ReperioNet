@@ -55,6 +55,16 @@ public sealed class SearchQueryOptions
     /// </summary>
     public int? RankLimit { get; set; }
 
+    /// <summary>
+    /// Only which documents match (2.8): every match comes back as the unranked list of <see cref="RankLimit"/> (score 0, no
+    /// snippet, all-terms matches first, then in index order), however few they are, and nothing is ranked or scored against a
+    /// stored text. The documents are those the ranked search finds with <see cref="MinScore"/> 0. For a caller that orders the
+    /// matches itself (a list by date, say) and shows no score: ranking and scoring were the larger part of such a search.
+    /// With a <see cref="RankLimit"/>, a word that is itself in more documents than the limit is listed without its phonetic
+    /// sound-alikes, as there. Default: <see langword="false"/>.
+    /// </summary>
+    public bool ListOnly { get; set; }
+
     /// <summary>Snippet generation options.</summary>
     public SnippetOptions Snippet { get; set; } = new();
 }
