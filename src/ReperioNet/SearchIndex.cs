@@ -296,6 +296,91 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         return RunReadAsync<IReadOnlyList<SearchMatch>>(connection => ScoreCore(connection, query, ids, effectiveOptions), ct);
     }
 
+    /// <summary>
+    /// The texts the given documents were added with, by id (2.7): what <c>AddAsync</c> was given, whether or not the index stores
+    /// content. An id the index does not hold is left out. A caller that has to test a text itself (a phrase character by
+    /// character, say) reads it here and does not have to keep a copy of every text. A long list is read in parts, side by side.
+    /// </summary>
+    /// <param name="ids">The ids of the documents.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task<IReadOnlyDictionary<string, string>> GetTextsAsync(IReadOnlyCollection<string> ids, CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(ids);
+        if (ids.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>(StringComparer.Ordinal));
+        }
+
+        return RunReadAsync<IReadOnlyDictionary<string, string>>(connection =>
+        {
+            var documents = LoadTextsInParts(connection, ids.Distinct(StringComparer.Ordinal).ToArray());
+            var texts = new Dictionary<string, string>(documents.Count, StringComparer.Ordinal);
+            foreach (var (docId, rankText, content) in documents)
+            {
+                texts[docId] = content ?? rankText;
+            }
+
+            return texts;
+        }, ct);
+    }
+
+    /// <summary>
+    /// The ids of the documents whose text contains <paramref name="value"/> anywhere, ignoring case (2.7): a plain substring test
+    /// (no tokens, no word forms, no typo tolerance), answered from the trigram index without reading one text.
+    /// <see langword="null"/> when the index cannot answer it: there is no trigram index
+    /// (<see cref="ReperioOptions{TMeta}.EnableTrigram"/>) or the value is shorter than three characters. The caller then tests the
+    /// texts itself (<see cref="GetTextsAsync"/>). Case is folded the way the trigram tokenizer of SQLite folds it.
+    /// </summary>
+    /// <param name="value">The text to look for, as it is (leading and trailing spaces count).</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task<IReadOnlySet<string>?> TryFindContainingAsync(string value, CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(value);
+        if (!_options.EnableTrigram || !HasThreeCharacters(value))
+        {
+            return Task.FromResult<IReadOnlySet<string>?>(null);
+        }
+
+        return RunReadAsync<IReadOnlySet<string>?>(connection =>
+        {
+            var rowids = new List<long>();
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "SELECT rowid FROM documents_trgm WHERE documents_trgm MATCH @match;";
+                command.Parameters.AddWithValue("@match", Fts5Match.EscapeToken(value));
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    rowids.Add(reader.GetInt64(0));
+                }
+            }
+
+            var found = new HashSet<string>(rowids.Count, StringComparer.Ordinal);
+            foreach (var (docId, _) in LoadDocumentIdsInParts(connection, rowids).Values)
+            {
+                found.Add(docId);
+            }
+
+            return found;
+        }, ct);
+    }
+
+    private static bool HasThreeCharacters(string value)
+    {
+        var count = 0;
+        foreach (var _ in value.EnumerateRunes())
+        {
+            if (++count == 3)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private SearchMatch[] ScoreCore(SqliteConnection connection, string query, IReadOnlyCollection<string> ids, SearchQueryOptions options)
     {
         var documents = LoadTextsInParts(connection, ids.Distinct(StringComparer.Ordinal).ToArray());
