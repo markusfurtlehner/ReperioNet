@@ -30,6 +30,35 @@ internal static class SqliteConnectionFactory
     internal static SqliteConnection Open(string connectionString) => Open(connectionString, encrypted: false);
 
     /// <summary>
+    /// Opens a connection for one read beside the caller's own (2.7.3). It goes back to the pool without its page cache: a search
+    /// that reads side by side opens up to a dozen and a half of them, and each kept up to 32 MB, about 600 MB for the mail of one
+    /// account after a query that read many texts.
+    /// </summary>
+    internal static SideConnection OpenSide(string connectionString) => new(Open(connectionString, encrypted: false));
+
+    /// <summary>A connection opened by <see cref="OpenSide"/>; disposing it frees its page cache and returns it to the pool.</summary>
+    internal readonly struct SideConnection(SqliteConnection connection) : IDisposable
+    {
+        public SqliteConnection Connection => connection;
+
+        public void Dispose()
+        {
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "PRAGMA shrink_memory;";
+                command.ExecuteNonQuery();
+            }
+            catch (SqliteException)
+            {
+                // A connection that failed keeps its cache until the pool drops it.
+            }
+
+            connection.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Opens the index's first connection. With <paramref name="encrypted"/>, the SQLite build must be SQLite3 Multiple
     /// Ciphers, checked before any PRAGMA that writes (a build without encryption would ignore the key and write the index
     /// in plaintext), and a file the key does not open is a <see cref="ReperioException"/>.

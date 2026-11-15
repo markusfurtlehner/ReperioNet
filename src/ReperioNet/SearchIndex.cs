@@ -403,7 +403,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 var part = new ArraySegment<TextSlice>(slices, i * size, Math.Min(size, slices.Length - (i * size)));
                 others[i - 1] = Task.Run(() =>
                 {
-                    using var own = SqliteConnectionFactory.Open(_connectionString);
+                    using var ownSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                    var own = ownSide.Connection;
                     return ContainingAmong(own, part, value, ct);
                 });
             }
@@ -435,7 +436,6 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
     private static List<string> ContainingAmong(SqliteConnection connection, IReadOnlyList<TextSlice> slices, string value, CancellationToken ct)
     {
         var found = new List<string>();
-        var bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(16 * 1024);
         var chars = System.Buffers.ArrayPool<char>.Shared.Rent(16 * 1024);
         try
         {
@@ -453,29 +453,22 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 }
 
                 command.CommandText =
-                    $"SELECT rowid, doc_id, content, rank_text FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
+                    $"SELECT doc_id, COALESCE(content, rank_text) FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
-                    // The text is read straight from the row into the buffer (the reader's stream on a column of a row with its
-                    // rowid): asking the reader for the value would make an array or a string of every text.
-                    var id = reader.GetString(1);
-                    using var stream = reader.GetStream(reader.IsDBNull(2) ? 3 : 2);
-                    var length = (int)stream.Length;
-                    if (bytes.Length < length)
-                    {
-                        System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
-                        bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(length);
-                    }
-
+                    // The text is taken as the UTF-8 bytes SQLite holds for the row: asking the reader for the value would make
+                    // an array or a string of every text.
+                    var id = reader.GetString(0);
+                    var utf8 = SQLitePCL.raw.sqlite3_column_blob(reader.Handle, 1);
+                    var length = utf8.Length;
                     if (chars.Length < length)
                     {
                         System.Buffers.ArrayPool<char>.Shared.Return(chars);
                         chars = System.Buffers.ArrayPool<char>.Shared.Rent(length);   // UTF-8 never has fewer bytes than UTF-16 has units
                     }
 
-                    stream.ReadExactly(bytes, 0, length);
-                    var text = chars.AsSpan(0, System.Text.Encoding.UTF8.GetChars(bytes.AsSpan(0, length), chars));
+                    var text = chars.AsSpan(0, System.Text.Encoding.UTF8.GetChars(utf8, chars));
                     var slice = byId[id];
                     var start = Math.Clamp(slice.Start, 0, text.Length);
                     var count = slice.Length < 0 ? text.Length - start : Math.Min(slice.Length, text.Length - start);
@@ -488,7 +481,6 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
             System.Buffers.ArrayPool<char>.Shared.Return(chars);
         }
 
@@ -583,7 +575,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             var part = new ArraySegment<string>(ids, i * size, Math.Min(size, ids.Length - (i * size)));
             others[i - 1] = Task.Run(() =>
             {
-                using var own = SqliteConnectionFactory.Open(_connectionString);
+                using var ownSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                var own = ownSide.Connection;
                 return LoadTexts(own, part);
             });
         }
@@ -1079,7 +1072,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         {
             trigram = Task.Run(() =>
             {
-                using var second = SqliteConnectionFactory.Open(_connectionString);
+                using var secondSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                var second = secondSide.Connection;
                 var found = new Dictionary<long, double>();
                 CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, found, ranked);
                 return found;
@@ -1220,7 +1214,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         {
             tailLoad = Task.Run(() =>
             {
-                using var second = SqliteConnectionFactory.Open(_connectionString);
+                using var secondSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                var second = secondSide.Connection;
                 return LoadTail(second);
             });
         }
@@ -1432,7 +1427,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             var part = rowids.GetRange(i * size, Math.Min(size, rowids.Count - i * size));
             others[i - 1] = Task.Run(() =>
             {
-                using var own = SqliteConnectionFactory.Open(_connectionString);
+                using var ownSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                var own = ownSide.Connection;
                 return LoadDocumentIds(own, part);
             });
         }
@@ -1584,7 +1580,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         => Task.Run(
             () =>
             {
-                using var connection = SqliteConnectionFactory.Open(_connectionString);
+                using var connectionSide = SqliteConnectionFactory.OpenSide(_connectionString);
+                var connection = connectionSide.Connection;
                 return work(connection);
             },
             ct);
