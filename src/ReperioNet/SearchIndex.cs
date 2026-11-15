@@ -367,6 +367,131 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         }, ct);
     }
 
+    /// <summary>
+    /// Of the given documents, the ids of those whose text contains <paramref name="value"/>, ignoring case (ordinal), each within
+    /// the part of its text the slice names (2.7.1). The texts are read and tested here, in parts side by side, in buffers that are
+    /// used again: the caller gets the ids and no text is handed out. It answers for any value and any index layout, at the
+    /// cost of reading the texts of the documents asked for; <see cref="TryFindContainingAsync"/> narrows them first where it can.
+    /// An id the index does not hold is left out.
+    /// </summary>
+    /// <param name="value">The text to look for, as it is.</param>
+    /// <param name="documents">The documents to test, each with the part of its text that counts.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task<IReadOnlySet<string>> FindContainingAmongAsync(string value, IReadOnlyCollection<TextSlice> documents, CancellationToken ct = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(documents);
+        if (documents.Count == 0)
+        {
+            return Task.FromResult<IReadOnlySet<string>>(new HashSet<string>(StringComparer.Ordinal));
+        }
+
+        return RunReadAsync<IReadOnlySet<string>>(connection =>
+        {
+            var slices = documents.ToArray();
+            var parts = Math.Min(Math.Min(Environment.ProcessorCount, 8), slices.Length / TextPartSize);
+            if (parts < 2)
+            {
+                return new HashSet<string>(ContainingAmong(connection, slices, value, ct), StringComparer.Ordinal);
+            }
+
+            var size = (slices.Length + parts - 1) / parts;
+            var others = new Task<List<string>>[parts - 1];
+            for (var i = 1; i < parts; i++)
+            {
+                var part = new ArraySegment<TextSlice>(slices, i * size, Math.Min(size, slices.Length - (i * size)));
+                others[i - 1] = Task.Run(() =>
+                {
+                    using var own = SqliteConnectionFactory.Open(_connectionString);
+                    return ContainingAmong(own, part, value, ct);
+                });
+            }
+
+            HashSet<string> found;
+            try
+            {
+                found = new HashSet<string>(ContainingAmong(connection, new ArraySegment<TextSlice>(slices, 0, size), value, ct), StringComparer.Ordinal);
+            }
+            catch
+            {
+                // The other reads must not outlive a failed call unobserved.
+                try { Task.WaitAll(others); }
+                catch { }
+
+                throw;
+            }
+
+            foreach (var other in others)
+            {
+                found.UnionWith(other.GetAwaiter().GetResult());
+            }
+
+            return found;
+        }, ct);
+    }
+
+    /// <summary>The ids of the given documents whose text slice contains the value, read on one connection without a string per text.</summary>
+    private static List<string> ContainingAmong(SqliteConnection connection, IReadOnlyList<TextSlice> slices, string value, CancellationToken ct)
+    {
+        var found = new List<string>();
+        var bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(16 * 1024);
+        var chars = System.Buffers.ArrayPool<char>.Shared.Rent(16 * 1024);
+        try
+        {
+            foreach (var chunk in slices.Chunk(500))
+            {
+                ct.ThrowIfCancellationRequested();
+                var byId = new Dictionary<string, TextSlice>(chunk.Length, StringComparer.Ordinal);
+                using var command = connection.CreateCommand();
+                var names = new string[chunk.Length];
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    names[i] = "@d" + i;
+                    command.Parameters.AddWithValue(names[i], chunk[i].Id);
+                    byId[chunk[i].Id] = chunk[i];
+                }
+
+                command.CommandText =
+                    $"SELECT doc_id, CAST(COALESCE(content, rank_text) AS BLOB) FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    var id = reader.GetString(0);
+                    var length = (int)reader.GetBytes(1, 0, null, 0, 0);
+                    if (bytes.Length < length)
+                    {
+                        System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
+                        bytes = System.Buffers.ArrayPool<byte>.Shared.Rent(length);
+                    }
+
+                    if (chars.Length < length)
+                    {
+                        System.Buffers.ArrayPool<char>.Shared.Return(chars);
+                        chars = System.Buffers.ArrayPool<char>.Shared.Rent(length);   // UTF-8 never has fewer bytes than UTF-16 has units
+                    }
+
+                    reader.GetBytes(1, 0, bytes, 0, length);
+                    var text = chars.AsSpan(0, System.Text.Encoding.UTF8.GetChars(bytes.AsSpan(0, length), chars));
+                    var slice = byId[id];
+                    var start = Math.Clamp(slice.Start, 0, text.Length);
+                    var count = slice.Length < 0 ? text.Length - start : Math.Min(slice.Length, text.Length - start);
+                    if (text.Slice(start, count).Contains(value.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        found.Add(id);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
+            System.Buffers.ArrayPool<char>.Shared.Return(chars);
+        }
+
+        return found;
+    }
+
     private static bool HasThreeCharacters(string value)
     {
         var count = 0;

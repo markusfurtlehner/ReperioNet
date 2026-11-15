@@ -102,6 +102,53 @@ public class GetTextsTests
         Assert.Equal(Documents - 2, omega!.Count);
     }
 
+    [Theory]
+    [InlineData(true, "om")]
+    [InlineData(false, "om")]
+    [InlineData(true, "ÄÖ")]
+    [InlineData(false, "number 14")]
+    [InlineData(true, "e")]
+    [InlineData(true, "second LINE")]
+    [InlineData(true, "nowhere")]
+    public async Task AmongGivenDocuments_TheOnesThatContainAValue_AreTheOnesAPlainSubstringTestFinds(bool storeContent, string value)
+    {
+        using var db = new TestDatabase();
+        await using var index = await SeedAsync(db, storeContent);
+
+        foreach (var count in new[] { 1, 40, Documents })
+        {
+            var asked = Enumerable.Range(1, count).Select(i => i * (Documents / count)).ToList();
+            var found = await index.FindContainingAmongAsync(value, asked.Select(i => new TextSlice($"doc-{i:D4}")).Append(new TextSlice("nope")).ToList());
+
+            var want = asked.Where(i => TextOf(i).Contains(value, StringComparison.OrdinalIgnoreCase)).Select(i => $"doc-{i:D4}");
+            Assert.Equal(want.Order(StringComparer.Ordinal), found.Order(StringComparer.Ordinal));
+        }
+    }
+
+    [Theory]
+    [InlineData(0, 5, "größe")]
+    [InlineData(0, 4, "größe")]
+    [InlineData(6, 3, "äöü")]
+    [InlineData(7, 3, "äöü")]
+    [InlineData(10, 100000, "second line")]
+    [InlineData(100000, 5, "e")]
+    [InlineData(3, 0, "")]
+    public async Task ASlice_LimitsTheTestToThatPartOfTheText(int start, int length, string value)
+    {
+        using var db = new TestDatabase();
+        await using var index = await SeedAsync(db, storeContent: true);
+
+        var found = await index.FindContainingAmongAsync(value, Enumerable.Range(1, 300).Select(i => new TextSlice($"doc-{i:D4}", start, length)).ToList());
+
+        var want = Enumerable.Range(1, 300).Where(i =>
+        {
+            var text = TextOf(i);
+            var from = Math.Min(start, text.Length);
+            return text.Substring(from, Math.Min(length, text.Length - from)).Contains(value, StringComparison.OrdinalIgnoreCase);
+        }).Select(i => $"doc-{i:D4}");
+        Assert.Equal(want.Order(StringComparer.Ordinal), found.Order(StringComparer.Ordinal));
+    }
+
     [Fact]
     public async Task AReplacedDocumentGivesItsNewText_AndARemovedOneIsGone()
     {
