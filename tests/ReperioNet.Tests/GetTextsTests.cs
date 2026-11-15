@@ -149,6 +149,33 @@ public class GetTextsTests
         Assert.Equal(want.Order(StringComparer.Ordinal), found.Order(StringComparer.Ordinal));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TestingManyLongTexts_DoesNotMakeAStringOrAnArrayOfEachText(bool storeContent)
+    {
+        // 600 texts of 40,000 characters: 24 MB as UTF-8, 48 MB as strings.
+        using var db = new TestDatabase();
+        await using var index = await TestOptions.OpenAsync(db, o => o.StoreContent = storeContent);
+        var filler = string.Concat(Enumerable.Repeat("lorem ipsum dolor sit amet ", 1480));
+        await index.AddRangeAsync(Enumerable.Range(1, 600).Select(i => TestOptions.Entry($"doc-{i:D4}", filler + (i % 4 == 0 ? "zq" : "xx"))));
+        var documents = Enumerable.Range(1, 600).Select(i => new TextSlice($"doc-{i:D4}")).ToList();
+        await index.FindContainingAmongAsync("zq", documents);   // the first call makes the buffers
+
+        // The count is of the whole process, and other tests run beside this one: the smallest of a few runs is this call's.
+        var allocated = long.MaxValue;
+        IReadOnlySet<string> found = new HashSet<string>();
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var before = GC.GetTotalAllocatedBytes(precise: true);
+            found = await index.FindContainingAmongAsync("zq", documents);
+            allocated = Math.Min(allocated, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+
+        Assert.Equal(150, found.Count);
+        Assert.True(allocated < 6_000_000, $"{allocated:N0} bytes were allocated to test 24 MB of text");
+    }
+
     [Fact]
     public async Task AReplacedDocumentGivesItsNewText_AndARemovedOneIsGone()
     {

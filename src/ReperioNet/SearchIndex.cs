@@ -453,12 +453,15 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 }
 
                 command.CommandText =
-                    $"SELECT doc_id, CAST(COALESCE(content, rank_text) AS BLOB) FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
+                    $"SELECT rowid, doc_id, content, rank_text FROM documents WHERE doc_id IN ({string.Join(", ", names)});";
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
-                    var id = reader.GetString(0);
-                    var length = (int)reader.GetBytes(1, 0, null, 0, 0);
+                    // The text is read straight from the row into the buffer (the reader's stream on a column of a row with its
+                    // rowid): asking the reader for the value would make an array or a string of every text.
+                    var id = reader.GetString(1);
+                    using var stream = reader.GetStream(reader.IsDBNull(2) ? 3 : 2);
+                    var length = (int)stream.Length;
                     if (bytes.Length < length)
                     {
                         System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
@@ -471,7 +474,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                         chars = System.Buffers.ArrayPool<char>.Shared.Rent(length);   // UTF-8 never has fewer bytes than UTF-16 has units
                     }
 
-                    reader.GetBytes(1, 0, bytes, 0, length);
+                    stream.ReadExactly(bytes, 0, length);
                     var text = chars.AsSpan(0, System.Text.Encoding.UTF8.GetChars(bytes.AsSpan(0, length), chars));
                     var slice = byId[id];
                     var start = Math.Clamp(slice.Start, 0, text.Length);
