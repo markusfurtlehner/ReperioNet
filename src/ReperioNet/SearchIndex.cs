@@ -1013,6 +1013,20 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // than the limit is answered from that list, unranked; any other is gathered again with its ranks, which is cheap then.
         Dictionary<long, double> primary;
         Dictionary<long, double> secondary;
+
+        // 2.9: a word whose own matches (the word and its stem) are already more than the RankLimit is answered from those
+        // alone, without the substring recall of the trigram table. Listing the substring matches of a long common word costs
+        // several times the listing of its own matches (measured on 127,000 mail texts: 65 ms against 10 ms for a word in
+        // 19,000 of them) and adds a handful of documents; like the sound-alikes of 2.6.1 they are noise for such a word.
+        if (options.RankLimit is { } ownLimit && tokens.Count > 0 && useTrigram)
+        {
+            (primary, secondary) = Gather(ranked: false, phonetic: false, substrings: false);
+            if (primary.Count + secondary.Count > Math.Max(0, ownLimit))
+            {
+                return Unranked();
+            }
+        }
+
         if (options.ListOnly)
         {
             // 2.8: the caller wants the matches and no rank: they are listed, with the sound-alikes unless the word by itself is
@@ -1072,8 +1086,9 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             return listed;
         }
 
-        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked, bool phonetic)
+        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked, bool phonetic, bool substrings = true)
         {
+        var useTrigram = _options.EnableTrigram && query.Length >= 3 && substrings;
         var primary = new Dictionary<long, double>();
         var secondary = new Dictionary<long, double>();
 

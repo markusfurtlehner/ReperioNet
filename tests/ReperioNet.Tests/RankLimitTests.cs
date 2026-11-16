@@ -130,6 +130,36 @@ public class RankLimitTests
         Assert.All(ranked, m => Assert.True(m.Score > 0));
     }
 
+    [Fact]
+    public async Task AWordOverTheLimitByItself_IsListedWithoutItsSubstringMatches()
+    {
+        // 2.9. "haus" is a word of thirty texts and a part of a word ("hausnummer") in thirty more.
+        using var db = new TestDatabase();
+        await using var index = await TestOptions.OpenAsync(db, o => o.EnableStemming = false);
+        await index.AddRangeAsync(Enumerable.Range(1, 30).Select(i => TestOptions.Entry($"own-{i:D2}", $"das haus {i}")));
+        await index.AddRangeAsync(Enumerable.Range(1, 30).Select(i => TestOptions.Entry($"part-{i:D2}", $"die hausnummer {i}")));
+        SearchQueryOptions Ask(int rankLimit, bool listOnly = false) =>
+            new() { Limit = 500, CandidatePoolSize = 500, RankLimit = rankLimit, ListOnly = listOnly, EnableFuzzy = false, EnablePhonetic = false };
+
+        // The word itself is over the limit: its own matches, unranked; a listed search gives the same documents.
+        var own = await index.SearchMatchesAsync("haus", Ask(rankLimit: 20));
+        Assert.Equal(30, own.Count);
+        Assert.All(own, m => Assert.StartsWith("own-", m.Id));
+        Assert.All(own, m => Assert.Equal(0d, m.Score));
+        var listed = await index.SearchMatchesAsync("haus", Ask(rankLimit: 20, listOnly: true));
+        Assert.Equal(own.Select(m => m.Id).Order(), listed.Select(m => m.Id).Order());
+
+        // Only with the substring matches is it over the limit: all of them, unranked.
+        var all = await index.SearchMatchesAsync("haus", Ask(rankLimit: 40));
+        Assert.Equal(60, all.Count);
+        Assert.All(all, m => Assert.Equal(0d, m.Score));
+
+        // Within the limit: ranked, substring matches included, as without a limit.
+        var ranked = await index.SearchMatchesAsync("haus", Ask(rankLimit: 60));
+        Assert.Equal(60, ranked.Count);
+        Assert.All(ranked, m => Assert.True(m.Score > 0));
+    }
+
     [Theory]
     [InlineData("kiwi")]
     [InlineData("omega")]
