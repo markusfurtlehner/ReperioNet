@@ -163,6 +163,9 @@ public class RankLimitTests
     [Theory]
     [InlineData("kiwi")]
     [InlineData("omega")]
+    [InlineData("ome")]
+    [InlineData("filler omega")]
+    [InlineData("text number 15")]
     public async Task AQueryWithinTheLimit_IsAnsweredAsWithoutOne(string query)
     {
         using var db = new TestDatabase();
@@ -173,6 +176,26 @@ public class RankLimitTests
 
         Assert.NotEmpty(without);
         Assert.Equal(without.Select(m => (m.Id, m.Score, m.Snippet)), with.Select(m => (m.Id, m.Score, m.Snippet)));
+    }
+
+    /// <summary>2.10: the bounded gather decides at the limit itself: as many matches as the limit are ranked, one more are listed.</summary>
+    [Theory]
+    [InlineData("kiwi", 15)]
+    [InlineData("omega", Documents)]
+    [InlineData("filler omega", Documents)]
+    public async Task TheLimitItself_IsRanked_AndOneMatchMore_IsListed(string query, int matches)
+    {
+        using var db = new TestDatabase();
+        await using var index = await SeedAsync(db);
+
+        var without = await index.SearchMatchesAsync(query, Options(rankLimit: null));
+        var atLimit = await index.SearchMatchesAsync(query, Options(rankLimit: matches));
+        var over = await index.SearchMatchesAsync(query, Options(rankLimit: matches - 1));
+
+        Assert.Equal(matches, without.Count);
+        Assert.Equal(without.Select(m => (m.Id, m.Score, m.Snippet)), atLimit.Select(m => (m.Id, m.Score, m.Snippet)));
+        Assert.Equal(matches, over.Count);
+        Assert.All(over, m => Assert.Equal((0d, (string?)null), (m.Score, m.Snippet)));
     }
 
     [Fact]
