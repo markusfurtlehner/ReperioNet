@@ -1019,6 +1019,40 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // times; the listing is the costly part (measured on 127,000 mail texts for a word in 1,000 of them: 17 ms each).
         Dictionary<long, double>? listedSubstrings = null;
 
+        // 2.10.2: the ranked trigram matches of this query, started beside its listing. A query within a RankLimit paid the
+        // trigram table twice one after the other, listed and then ranked (measured on 127,000 mail texts for a word in 1,000
+        // of them: 17 ms and 30 ms). The ranked statement now runs on a connection of its own while the matches are listed.
+        // It is unordered and stops one row past the limit, and it is told to stop when the listing shows the query to be
+        // over the limit, so a query that is listed in the end costs no more time than before.
+        Task<Dictionary<long, double>>? rankedSubstrings = null;
+        CancellationTokenSource? rankedStop = null;
+
+        void StartRankedSubstrings(int limit)
+        {
+            if (!useTrigram || tokens.Count == 0 || limit >= options.CandidatePoolSize)
+            {
+                return;
+            }
+
+            var stop = rankedStop = new CancellationTokenSource();
+            var started = rankedSubstrings = Task.Run(() =>
+            {
+                using var side = SqliteConnectionFactory.OpenSide(_connectionString);
+                var found = new Dictionary<long, double>();
+                CollectRankedUnordered(side.Connection, "documents_trgm", Fts5Match.EscapeToken(query), limit + 1, found, stop.Token);
+                return found;
+            });
+
+            // Never left unobserved, whoever takes it up or lets it go.
+            _ = started.ContinueWith(static done => _ = done.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        }
+
+        void DropRankedSubstrings()
+        {
+            rankedStop?.Cancel();
+            rankedSubstrings = null;
+        }
+
         // 2.9: a word whose own matches (the word and its stem) are already more than the RankLimit is answered from those
         // alone, without the substring recall of the trigram table. Listing the substring matches of a long common word costs
         // several times the listing of its own matches (measured on 127,000 mail texts: 65 ms against 10 ms for a word in
@@ -1050,6 +1084,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             // 2.6.1: first without the sound-alikes. A word that is itself in more documents than the limit is answered from its own
             // matches; the phonetic clause made that listing up to twice as slow and added only noise to such a word.
             var soundAlikes = tokens.Count > 0 && _options.EnablePhonetic && options.EnablePhonetic;
+            StartRankedSubstrings(Math.Max(0, rankLimit));
             (primary, secondary) = Gather(ranked: false, phonetic: false);
             if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
             {
@@ -1069,6 +1104,10 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 (primary, secondary) = Gather(ranked: true, phonetic: true);
             }
+            else
+            {
+                DropRankedSubstrings();
+            }
         }
         else
         {
@@ -1077,6 +1116,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
 
         List<RawHit> Unranked()
         {
+            DropRankedSubstrings();
             var rowids = primary.Keys.Order().Concat(secondary.Keys.Order()).Take(Math.Max(0, options.CandidatePoolSize)).ToList();
             var keys = keysOnly ? LoadDocumentIdsInParts(connection, rowids) : LoadDocumentKeys(connection, rowids);
             var listed = new List<RawHit>(rowids.Count);
@@ -1103,7 +1143,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         Task<Dictionary<long, double>>? trigram = null;
         if (useTrigram && tokens.Count > 0)
         {
-            trigram = !ranked && listedSubstrings is not null ? Task.FromResult(listedSubstrings) : Task.Run(() =>
+            trigram = !ranked && listedSubstrings is not null ? Task.FromResult(listedSubstrings) : ranked && rankedSubstrings is { } beside ? beside : Task.Run(() =>
             {
                 using var secondSide = SqliteConnectionFactory.OpenSide(_connectionString);
                 var second = secondSide.Connection;
@@ -1548,6 +1588,31 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 bestRank[rowid] = rank;
             }
+        }
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="rows"/> matches of one statement with their bm25, in the order the index lists them: its
+    /// cost is bounded by that number, and its rows are all the matches only when it gave fewer. It ends early when it is told
+    /// to stop; what it read by then is not for use.
+    /// </summary>
+    private static void CollectRankedUnordered(
+        SqliteConnection connection,
+        string table,
+        string match,
+        int rows,
+        Dictionary<long, double> bestRank,
+        CancellationToken stop)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match LIMIT @rows;";
+        command.Parameters.AddWithValue("@match", match);
+        command.Parameters.AddWithValue("@rows", rows);
+
+        using var reader = command.ExecuteReader();
+        while (!stop.IsCancellationRequested && reader.Read())
+        {
+            bestRank[reader.GetInt64(0)] = reader.GetDouble(1);
         }
     }
 
