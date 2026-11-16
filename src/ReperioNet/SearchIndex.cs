@@ -1013,7 +1013,11 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         // than the limit is answered from that list, unranked; any other is gathered again with its ranks, which is cheap then.
         Dictionary<long, double> primary;
         Dictionary<long, double> secondary;
-        var stopped = false;   // a statement of the last bounded gather reached its bound
+
+        // 2.10.1: the unranked trigram listing of this query, kept for the gathers of this call. A query within a RankLimit is
+        // listed twice (without and with its sound-alikes) before it is ranked, and the substring matches are the same both
+        // times; the listing is the costly part (measured on 127,000 mail texts for a word in 1,000 of them: 17 ms each).
+        Dictionary<long, double>? listedSubstrings = null;
 
         // 2.9: a word whose own matches (the word and its stem) are already more than the RankLimit is answered from those
         // alone, without the substring recall of the trigram table. Listing the substring matches of a long common word costs
@@ -1046,42 +1050,24 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             // 2.6.1: first without the sound-alikes. A word that is itself in more documents than the limit is answered from its own
             // matches; the phonetic clause made that listing up to twice as slow and added only noise to such a word.
             var soundAlikes = tokens.Count > 0 && _options.EnablePhonetic && options.EnablePhonetic;
-
-            // 2.10: the matches are first gathered with their ranks, every statement stopped one row past the limit and
-            // unordered, so its cost is bounded by the limit whatever the query matches. When no statement was stopped and the
-            // matches together are within the limit, they are the ranked answer: the listings below would only have counted
-            // them, each paying the trigram listing again (measured on 127,000 mail texts for a word in 1,000 of them: 17 ms
-            // per listing and 30 ms ranked, so 64 ms became 30).
-            var bound = Math.Max(0, rankLimit) + 1;
-            var within = false;
-            (primary, secondary) = (new Dictionary<long, double>(), new Dictionary<long, double>());
-            if (bound <= options.CandidatePoolSize)
+            (primary, secondary) = Gather(ranked: false, phonetic: false);
+            if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
             {
-                (primary, secondary) = Gather(ranked: true, phonetic: true, substrings: true, stopAt: bound);
-                within = !stopped && primary.Count + secondary.Count < bound;
+                return Unranked();
             }
 
-            if (!within)
+            if (soundAlikes)
             {
-                (primary, secondary) = Gather(ranked: false, phonetic: false);
+                (primary, secondary) = Gather(ranked: false, phonetic: true);
                 if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
                 {
                     return Unranked();
                 }
+            }
 
-                if (soundAlikes)
-                {
-                    (primary, secondary) = Gather(ranked: false, phonetic: true);
-                    if (primary.Count + secondary.Count > Math.Max(0, rankLimit))
-                    {
-                        return Unranked();
-                    }
-                }
-
-                if (primary.Count + secondary.Count > 0)
-                {
-                    (primary, secondary) = Gather(ranked: true, phonetic: true);
-                }
+            if (primary.Count + secondary.Count > 0)
+            {
+                (primary, secondary) = Gather(ranked: true, phonetic: true);
             }
         }
         else
@@ -1105,18 +1091,8 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             return listed;
         }
 
-        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked, bool phonetic, bool substrings = true, int? stopAt = null)
+        (Dictionary<long, double> Primary, Dictionary<long, double> Secondary) Gather(bool ranked, bool phonetic, bool substrings = true)
         {
-        stopped = false;
-        var rows = stopAt ?? options.CandidatePoolSize;
-        void Note(int given)
-        {
-            if (stopAt is { } at && given >= at)
-            {
-                Volatile.Write(ref stopped, true);
-            }
-        }
-
         var useTrigram = _options.EnableTrigram && query.Length >= 3 && substrings;
         var primary = new Dictionary<long, double>();
         var secondary = new Dictionary<long, double>();
@@ -1127,12 +1103,12 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
         Task<Dictionary<long, double>>? trigram = null;
         if (useTrigram && tokens.Count > 0)
         {
-            trigram = Task.Run(() =>
+            trigram = !ranked && listedSubstrings is not null ? Task.FromResult(listedSubstrings) : Task.Run(() =>
             {
                 using var secondSide = SqliteConnectionFactory.OpenSide(_connectionString);
                 var second = secondSide.Connection;
                 var found = new Dictionary<long, double>();
-                Note(CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), rows, found, ranked, stopAt is null));
+                CollectCandidates(second, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, found, ranked);
                 return found;
             });
         }
@@ -1173,13 +1149,13 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             {
                 // Strict pass: implicit-AND on base only (cheap — the intersection is small).
                 var andMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: false, stemTokens: null, phoneticTokens: null, allTermsBase: true);
-                Note(CollectCandidates(connection, "documents_fts", andMatch, rows, primary, ranked, stopAt is null));
+                CollectCandidates(connection, "documents_fts", andMatch, options.CandidatePoolSize, primary, ranked);
 
                 if (primary.Count < Math.Max(0, options.Limit))
                 {
                     // Recall fallback: the classic §9.5 any-term expression incl. stem/phonetic.
                     var orMatch = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
-                    Note(CollectCandidates(connection, "documents_fts", orMatch, rows, secondary, ranked, stopAt is null));
+                    CollectCandidates(connection, "documents_fts", orMatch, options.CandidatePoolSize, secondary, ranked);
                 }
             }
             else
@@ -1187,7 +1163,7 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 // §9.5: OR-combined column clauses, plus the short-query prefix aid on base when
                 // the whole query is < 3 chars.
                 var match = Fts5Match.BuildMatch(tokens, prefixLastToken: query.Length < 3, stemTokens, phoneticTokens);
-                Note(CollectCandidates(connection, "documents_fts", match, rows, primary, ranked, stopAt is null));
+                CollectCandidates(connection, "documents_fts", match, options.CandidatePoolSize, primary, ranked);
             }
         }
 
@@ -1200,11 +1176,17 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
             var target = useAllTerms ? secondary : primary;
             if (trigram is null)
             {
-                Note(CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), rows, target, ranked, stopAt is null));
+                CollectCandidates(connection, "documents_trgm", Fts5Match.EscapeToken(query), options.CandidatePoolSize, target, ranked);
             }
             else
             {
-                foreach (var (rowid, rank) in trigram.GetAwaiter().GetResult())
+                var found = trigram.GetAwaiter().GetResult();
+                if (!ranked)
+                {
+                    listedSubstrings = found;
+                }
+
+                foreach (var (rowid, rank) in found)
                 {
                     if (!target.TryGetValue(rowid, out var existing) || rank < existing)
                     {
@@ -1542,32 +1524,24 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
     }
 
     /// <summary>Runs one MATCH query and merges (rowid, bm25) results into <paramref name="bestRank"/>, keeping the lowest bm25 per rowid.</summary>
-    /// <summary>Reads the matches of one statement into <paramref name="bestRank"/> and returns how many rows it gave. A ranked
-    /// statement that is not <paramref name="ordered"/> stops after <paramref name="poolSize"/> rows in the order the index
-    /// lists them: its cost is bounded by that number, and its rows are all the matches only when it gave fewer.</summary>
-    private static int CollectCandidates(
+    private static void CollectCandidates(
         SqliteConnection connection,
         string table,
         string match,
         int poolSize,
         Dictionary<long, double> bestRank,
-        bool ranked,
-        bool ordered = true)
+        bool ranked)
     {
         using var command = connection.CreateCommand();
         command.CommandText = ranked
-            ? ordered
-                ? $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match ORDER BY rank, rowid LIMIT @pool;"
-                : $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match LIMIT @pool;"
+            ? $"SELECT rowid, bm25({table}) AS rank FROM {table} WHERE {table} MATCH @match ORDER BY rank, rowid LIMIT @pool;"
             : $"SELECT rowid, 0.0 AS rank FROM {table} WHERE {table} MATCH @match LIMIT @pool;";
         command.Parameters.AddWithValue("@match", match);
         command.Parameters.AddWithValue("@pool", poolSize);
 
-        var given = 0;
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            given++;
             var rowid = reader.GetInt64(0);
             var rank = reader.GetDouble(1);
             if (!bestRank.TryGetValue(rowid, out var existing) || rank < existing)
@@ -1575,8 +1549,6 @@ public sealed partial class SearchIndex<TMeta> : IAsyncDisposable
                 bestRank[rowid] = rank;
             }
         }
-
-        return given;
     }
 
     /// <summary>Loads <c>doc_id</c>, metadata JSON, <c>rank_text</c> and <c>content</c> for the candidate rowids (chunked IN queries, §9.8).</summary>
